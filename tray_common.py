@@ -26,7 +26,8 @@ UI_MUTEX_NAME = "Local\\PersonalThreeDeviceBattery.Panel.v1"
 UI_TITLE = "我的三设备电量 · Personal"
 MSG_QUIT = "PersonalThreeDeviceBattery.Quit.v1"
 MSG_RELOAD = "PersonalThreeDeviceBattery.Reload.v1"
-DEFAULT_CONFIG = {"interval": 60, "autostart": False}
+DEFAULT_CONFIG = {"interval": 60, "autostart": False,
+                  "corner": True, "corner_pos": None}
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),
                     (300, "5 分钟"), (600, "10 分钟"), (1800, "30 分钟")]
 STARTUP_LNK_NAME = "我的三设备电量-Personal-托盘.lnk"
@@ -63,6 +64,14 @@ def validate_config(data) -> dict:
             clean["interval"] = value
         if type(data.get("autostart")) is bool:
             clean["autostart"] = data["autostart"]
+        if type(data.get("corner")) is bool:
+            clean["corner"] = data["corner"]
+        pos = data.get("corner_pos")
+        # Saved corner-indicator position; reject anything that is not a
+        # plain pair of ints, so a corrupt config cannot place it off-screen.
+        if (isinstance(pos, list) and len(pos) == 2
+                and all(type(v) is int and -20000 < v < 20000 for v in pos)):
+            clean["corner_pos"] = [pos[0], pos[1]]
     return clean
 
 

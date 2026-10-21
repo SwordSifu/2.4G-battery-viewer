@@ -142,6 +142,8 @@ class TrayApp:
                          for key in pd.DEVICE_KEYS}
         self.icons_added = False
         self.closing = False
+        self.corner = None
+        self.corner_locked = True
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
         self.msg_quit = USER32.RegisterWindowMessageW(tc.MSG_QUIT)
         self.msg_reload = USER32.RegisterWindowMessageW(tc.MSG_RELOAD)
@@ -254,6 +256,71 @@ class TrayApp:
         self.log("刷新完成: " + ", ".join(
             f"{k}={self.readings[k].display_value}" for k in pd.DEVICE_KEYS))
         self.update_icons()
+        self.update_corner()
+
+    # ---- 左下角环状浮窗 ----
+    def create_corner(self) -> None:
+        """浮窗跑在本进程内：不另开进程，也不重复查询 HID。"""
+        import corner_widget
+        self.corner = corner_widget.CornerWidget(
+            on_refresh=self.refresh_now,
+            on_open_panel=self.open_ui,
+            on_toggle_tray=self.toggle_icons,
+            on_hide=self.hide_corner,
+            on_quit=self.quit,
+            on_toggle_lock=self.toggle_corner_lock,
+            interval_getter=lambda: self.cfg["interval"],
+            on_interval_change=self.set_interval_from_menu,
+            locked=self.corner_locked,
+            position=self.cfg.get("corner_pos"),
+        )
+        if not self.corner.create():
+            self.log("浮窗创建失败（继续只用托盘图标）")
+            self.corner = None
+            return
+        self.update_corner()
+        self.log(f"左下角浮窗已创建 size={self.corner.width}x{self.corner.height} "
+                 f"scale={getattr(self.corner, 'last_scale', '?')}")
+
+    def update_corner(self) -> None:
+        if not self.corner:
+            return
+        rows = [self.readings[key] for key in pd.DEVICE_KEYS]
+        self.corner.update(rows)
+
+    def hide_corner(self) -> None:
+        if self.corner:
+            self.corner.hide()
+        self.cfg["corner"] = False
+        tc.save_config(self.cfg)
+        self.log("浮窗已隐藏")
+
+    def toggle_corner_lock(self, keep: bool = False) -> None:
+        if not self.corner:
+            return
+        if keep:
+            # 拖动结束：记住位置，但仍然保持解锁，方便继续微调
+            self.cfg["corner_pos"] = list(self.corner.position or [])
+            tc.save_config(self.cfg)
+            return
+        self.corner_locked = not self.corner_locked
+        self.corner.set_locked(self.corner_locked)
+        if self.corner_locked and self.corner.position:
+            self.cfg["corner_pos"] = list(self.corner.position)
+            tc.save_config(self.cfg)
+        self.log("浮窗" + ("锁定" if self.corner_locked else "解锁"))
+
+    def set_interval_from_menu(self, seconds: int) -> None:
+        self.cfg["interval"] = int(seconds)
+        if tc.save_config(self.cfg):
+            self.apply_timer()
+        self.log(f"刷新间隔 -> {seconds} 秒")
+
+    def toggle_icons(self) -> None:
+        if self.icons_added:
+            self.remove_icons()
+        else:
+            self.add_icons()
 
     # ---- UI ----
     def open_ui(self) -> None:
@@ -268,6 +335,16 @@ class TrayApp:
         self.closing = True
         self.log("退出")
         self.stop_event.set()
+        try:
+            if self.corner:
+                # 记住最后位置，下次启动回到原处
+                if self.corner.position:
+                    self.cfg["corner_pos"] = list(self.corner.position)
+                    tc.save_config(self.cfg)
+                self.corner.destroy()
+                self.corner = None
+        except Exception:
+            self.log("销毁浮窗出错（忽略）:\n" + traceback.format_exc())
         self.remove_icons()
         try:
             win_icon.destroy_all()
@@ -335,6 +412,8 @@ class TrayApp:
         self.add_icons()
         self.apply_config()
         self.apply_timer()
+        if self.cfg.get("corner", True):
+            self.create_corner()
         self.refresh_now()
         message = MSG()
         while USER32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
