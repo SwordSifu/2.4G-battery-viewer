@@ -1,34 +1,23 @@
 # -*- coding: utf-8 -*-
-"""tray_app.py —— 托盘电量监视器（纯 ctypes，无第三方依赖）
+"""tray_app.py —— 三设备电量托盘（纯 ctypes，无第三方依赖）
 
-界面约定
---------
-* 通知区域两个图标：ATK 鼠标（纯数字）、DARKRIM 耳机（数字带深色底板）。
-  图标颜色随电量变化：绿 ≥60 / 黄 30-59 / 红 <30。
-* **右键图标 → 直接打开简洁界面**（界面里改设置：刷新间隔 / 开机自启 / 退出托盘）。
-* 左键图标 → 立刻刷新一次。
-* 悬停显示 tooltip：设备名 + 电量 + 更新时间。
+* 通知区域三个图标：鼠标 / 键盘 / 手柄。图标内容就是电量数字；
+  手柄只有四档区间，图标显示 "--"，tooltip 写清档位。
+* 右键任意图标 → 打开/前置唯一的面板窗口；左键 → 立刻刷新一次。
+* 悬停 tooltip：设备名 + 数值 + 来源 + 更新时间。
+* 低 CPU：SetTimer 驱动，空闲不轮询；读取在后台线程。
+* 不写任何日志文件；只有 --debug 时才往控制台打印。
 
-其它
-----
-* 开机自启用「启动」文件夹里的快捷方式（`电量托盘.lnk`，任务管理器可见）+ pythonw.exe。
-* 低 CPU：SetTimer 驱动，空闲不轮询；读取在后台线程；默认 60 秒一轮。
-* **不写日志文件**：只有 `--debug` 时才往控制台打印。
-* 全 ctypes 调 shell32/user32，不依赖 pystray / Pillow。
-
-启动：
-    pythonw tray_app.py        # 静默驻留（开机自启用的就是这个）
-    python  tray_app.py --debug   # 前台运行并打印过程信息（排查问题用）
+    pythonw tray_app.py          # 静默驻留
+    python  tray_app.py --debug  # 前台运行并打印过程
     python  tray_app.py --status
     python  tray_app.py --quit
 """
-
 from __future__ import annotations
 
 import argparse
 import ctypes
 import json
-import os
 import sys
 import threading
 import time
@@ -36,9 +25,7 @@ import traceback
 from ctypes import wintypes
 from typing import Optional
 
-import hid_win as hw
-import battery as bt
-import darkrim_proto as drp
+import personal_devices as pd
 import win_icon
 import tray_common as tc
 
@@ -53,7 +40,7 @@ SHELL32 = ctypes.WinDLL("shell32", use_last_error=True)
 
 WM_DESTROY = 0x0002
 WM_TIMER = 0x0113
-WM_NULL = 0x0000
+WM_CLOSE = 0x0010
 WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
@@ -64,48 +51,30 @@ MSG_REFRESH_DONE = WM_APP + 2
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
 NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x01, 0x02, 0x04
 
-SW_RESTORE = 9
-
-# --------------------------------------------------------------------------
-# Win32 结构体与原型
-# --------------------------------------------------------------------------
 WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_uint,
                              ctypes.c_size_t, ctypes.c_ssize_t)
 
 
 class WNDCLASSEXW(ctypes.Structure):
     _fields_ = [
-        ("cbSize", wintypes.UINT),
-        ("style", wintypes.UINT),
-        ("lpfnWndProc", WNDPROC),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", ctypes.c_void_p),
-        ("hIcon", ctypes.c_void_p),
-        ("hCursor", ctypes.c_void_p),
-        ("hbrBackground", ctypes.c_void_p),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-        ("hIconSm", ctypes.c_void_p),
+        ("cbSize", wintypes.UINT), ("style", wintypes.UINT),
+        ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int), ("hInstance", ctypes.c_void_p),
+        ("hIcon", ctypes.c_void_p), ("hCursor", ctypes.c_void_p),
+        ("hbrBackground", ctypes.c_void_p), ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR), ("hIconSm", ctypes.c_void_p),
     ]
 
 
 class NOTIFYICONDATAW(ctypes.Structure):
     _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("hWnd", ctypes.c_void_p),
-        ("uID", wintypes.UINT),
-        ("uFlags", wintypes.UINT),
-        ("uCallbackMessage", wintypes.UINT),
-        ("hIcon", ctypes.c_void_p),
-        ("szTip", ctypes.c_wchar * 128),
-        ("dwState", wintypes.DWORD),
-        ("dwStateMask", wintypes.DWORD),
-        ("szInfo", ctypes.c_wchar * 256),
-        ("uVersion", wintypes.UINT),
-        ("szInfoTitle", ctypes.c_wchar * 64),
-        ("dwInfoFlags", wintypes.DWORD),
-        ("guidItem", hw.GUID),
+        ("cbSize", wintypes.DWORD), ("hWnd", ctypes.c_void_p),
+        ("uID", wintypes.UINT), ("uFlags", wintypes.UINT),
+        ("uCallbackMessage", wintypes.UINT), ("hIcon", ctypes.c_void_p),
+        ("szTip", ctypes.c_wchar * 128), ("dwState", wintypes.DWORD),
+        ("dwStateMask", wintypes.DWORD), ("szInfo", ctypes.c_wchar * 256),
+        ("uVersion", wintypes.UINT), ("szInfoTitle", ctypes.c_wchar * 64),
+        ("dwInfoFlags", wintypes.DWORD), ("guidItem", ctypes.c_ubyte * 16),
         ("hBalloonIcon", ctypes.c_void_p),
     ]
 
@@ -150,50 +119,15 @@ SHELL32.Shell_NotifyIconW.argtypes = [wintypes.DWORD,
 
 KERNEL32.GetModuleHandleW.restype = ctypes.c_void_p
 KERNEL32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-KERNEL32.CreateMutexW.restype = ctypes.c_void_p
-KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
-                                  wintypes.LPCWSTR]
 
+# (uID, key, 是否带底板)
 TRAY_ICONS = [
-    # (uID, key, 提示名, 是否带底板)
-    (1, "mouse", "ATK 鼠标", False),
-    (2, "headset", "DARKRIM 耳机", True),
+    (1, "mouse", False),
+    (2, "keyboard", True),
+    (3, "gamepad", True),
 ]
 
 
-# --------------------------------------------------------------------------
-# 设备读取（轻量版）
-# --------------------------------------------------------------------------
-def _find_iface(vid: int, usage_page: int, output_len: int = 0):
-    for d in hw.enumerate_hid():
-        if d.vid == vid and d.usage_page == usage_page:
-            if not output_len or d.output_len == output_len:
-                return d
-    return None
-
-
-def read_mouse() -> tuple[Optional[int], str]:
-    iface = _find_iface(0x373B, 0xFF05, 64) or _find_iface(0x373B, 0xFF02)
-    if iface is None:
-        return None, "没找到接收器"
-    try:
-        res = bt.strategy_vendor_protocol(iface)
-    except Exception as e:
-        return None, f"读取失败：{e}"
-    if res is None:
-        return None, "没有可用的读取方式"
-    if res.ok:
-        return res.level, ""
-    return None, res.detail or "无回复（动一下鼠标）"
-
-
-def read_headset() -> tuple[Optional[int], str]:
-    return drp.read_battery_only(timeout=0.4)
-
-
-# --------------------------------------------------------------------------
-# 托盘程序
-# --------------------------------------------------------------------------
 class TrayApp:
     def __init__(self, debug: bool = False):
         self.debug = debug
@@ -201,24 +135,23 @@ class TrayApp:
         self.hwnd: Optional[int] = None
         self.wndproc_ref = None
         self.busy = False
-        self.levels = {k: (None, "正在读取…") for _, k, _, _ in TRAY_ICONS}
+        self.stop_event = threading.Event()
+        self.worker: Optional[threading.Thread] = None
+        self.readings = {key: pd.Reading(pd.DEVICE_TITLES[key], "",
+                                         error="正在读取…", key=key)
+                         for key in pd.DEVICE_KEYS}
         self.icons_added = False
+        self.closing = False
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
         self.msg_quit = USER32.RegisterWindowMessageW(tc.MSG_QUIT)
         self.msg_reload = USER32.RegisterWindowMessageW(tc.MSG_RELOAD)
-        self.log("启动，配置 = " + json.dumps(self.cfg, ensure_ascii=False))
+        self.log("启动 " + json.dumps(self.cfg, ensure_ascii=False))
 
-    # ---- 输出（默认不落盘）---------------------------------------------
-    def log(self, msg: str) -> None:
-        """只在 --debug 时输出到控制台。
-
-        默认**不写任何日志文件**（不占磁盘也不留痕）；需要排查问题时用
-        `python tray_app.py --debug` 前台跑一次就能看到全部输出。
-        """
+    def log(self, message: str) -> None:
         if self.debug:
-            print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+            print(f"{time.strftime('%H:%M:%S')} {message}", flush=True)
 
-    # ---- 图标 ----------------------------------------------------------
+    # ---- icons ----
     @staticmethod
     def _color(level: Optional[int]) -> tuple[int, int, int]:
         if level is None:
@@ -229,46 +162,60 @@ class TrayApp:
             return (245, 196, 81)
         return (255, 107, 107)
 
-    def _nid(self, uID: int):
+    def _tip(self, key: str) -> str:
+        reading = self.readings[key]
+        stamp = (time.strftime("%H:%M:%S", time.localtime(reading.updated_at))
+                 if reading.updated_at else "未读取")
+        if not reading.ok:
+            return f"{pd.DEVICE_TITLES[key]}：{reading.error or '未知'}（{stamp}）"
+        text = f"{pd.DEVICE_TITLES[key]}：{reading.display_value}"
+        if reading.status:
+            text += f"，{reading.status}"
+        text += f"（{stamp} 更新）"
+        if reading.level is None:
+            text += "｜无精确百分比"
+        return text
+
+    def _nid(self, uid: int):
         nid = NOTIFYICONDATAW()
         nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
         nid.hWnd = self.hwnd
-        nid.uID = uID
+        nid.uID = uid
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = MSG_TRAY_CALLBACK
         return nid
 
-    def _apply_icon(self, action: int, uID: int, key: str, title: str,
-                    plate: bool) -> bool:
-        level, err = self.levels[key]
+    def _apply_icon(self, action: int, uid: int, key: str, plate: bool) -> bool:
+        reading = self.readings[key]
+        level = reading.level if reading.ok else None
+        # Never render a coarse category as a number on the icon.
         text = str(level) if level is not None else "--"
-        nid = self._nid(uID)
+        nid = self._nid(uid)
         nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
-        nid.szTip = (f"{title}：{level}%（{time.strftime('%H:%M:%S')} 更新）"
-                     if level is not None else f"{title}：{err or '未知'}")
+        nid.szTip = self._tip(key)[:127]
         return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
 
     def add_icons(self) -> None:
-        for uID, key, title, plate in TRAY_ICONS:
-            ok = self._apply_icon(NIM_ADD, uID, key, title, plate)
-            self.log(f"NIM_ADD {title} -> {'ok' if ok else '失败'}")
+        for uid, key, plate in TRAY_ICONS:
+            ok = self._apply_icon(NIM_ADD, uid, key, plate)
+            self.log(f"NIM_ADD {key} -> {ok}")
         self.icons_added = True
 
     def update_icons(self) -> None:
         if not self.icons_added:
             self.add_icons()
             return
-        for uID, key, title, plate in TRAY_ICONS:
-            self._apply_icon(NIM_MODIFY, uID, key, title, plate)
+        for uid, key, plate in TRAY_ICONS:
+            self._apply_icon(NIM_MODIFY, uid, key, plate)
 
     def remove_icons(self) -> None:
-        for uID, _, _, _ in TRAY_ICONS:
-            nid = self._nid(uID)
+        for uid, _, _ in TRAY_ICONS:
+            nid = self._nid(uid)
             nid.uFlags = 0
             SHELL32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
         self.icons_added = False
 
-    # ---- 定时器 / 刷新 --------------------------------------------------
+    # ---- timer / refresh ----
     def apply_timer(self) -> None:
         if not self.hwnd:
             return
@@ -276,108 +223,96 @@ class TrayApp:
         USER32.SetTimer(self.hwnd, 1, int(self.cfg["interval"]) * 1000, None)
 
     def apply_config(self) -> None:
-        """同步界面里改过的设置。
-
-        注意：开机自启这里**只读不改**——托盘绝不替用户动系统设置。
-        （早先的版本会自动"纠正"，结果一次读到不一致就把用户的启动项删了。）
-        """
-        new = tc.load_config()
-        changed = new["interval"] != self.cfg["interval"]
-        self.cfg = new
-        if changed:
-            self.log(f"刷新间隔 -> {new['interval']} 秒")
+        """Re-read interval only. Autostart is never 'repaired' here."""
+        fresh = tc.load_config()
+        if fresh["interval"] != self.cfg["interval"]:
+            self.cfg = fresh
             self.apply_timer()
-
-        actual = tc.is_autostart_enabled()
-        if bool(self.cfg.get("autostart")) != actual:
-            # 只把真实状态写回配置，让界面上的勾选和任务管理器保持一致
-            self.cfg["autostart"] = actual
-            tc.save_config(self.cfg)
-            self.log(f"开机自启实际为 {actual}，已同步到配置（未改动系统设置）")
+            self.log(f"刷新间隔 -> {fresh['interval']} 秒")
 
     def refresh_now(self) -> None:
-        if self.busy or not self.hwnd:
+        if self.busy or not self.hwnd or self.closing:
             return
         self.busy = True
-        threading.Thread(target=self._worker, args=(self.hwnd,), daemon=True).start()
+        self.worker = threading.Thread(target=self._work, daemon=True)
+        self.worker.start()
 
-    def _worker(self, hwnd: int) -> None:
+    def _work(self) -> None:
         try:
-            self.levels["mouse"] = read_mouse()
-            self.levels["headset"] = read_headset()
+            rows = pd.read_all(stop_event=self.stop_event)
+            for reading in rows:
+                self.readings[reading.key] = reading
         except Exception:
             self.log("读取异常:\n" + traceback.format_exc())
-        USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
+        finally:
+            hwnd = self.hwnd
+            if hwnd and not self.closing:
+                USER32.PostMessageW(hwnd, MSG_REFRESH_DONE, 0, 0)
 
     def on_refresh_done(self) -> None:
         self.busy = False
-        m, h = self.levels["mouse"], self.levels["headset"]
-        self.log(f"刷新完成：鼠标={m[0]}（{m[1] or 'ok'}） 耳机={h[0]}（{h[1] or 'ok'}）")
+        self.log("刷新完成: " + ", ".join(
+            f"{k}={self.readings[k].display_value}" for k in pd.DEVICE_KEYS))
         self.update_icons()
 
-    # ---- 打开简洁界面 ---------------------------------------------------
+    # ---- UI ----
     def open_ui(self) -> None:
-        hwnd = tc.ui_hwnd()
-        if hwnd:
-            USER32.ShowWindow(hwnd, SW_RESTORE)
-            USER32.SetForegroundWindow(hwnd)
-            self.log("简洁界面已在前台")
-            return
-        import subprocess
-        try:
-            subprocess.Popen([tc.pythonw_path(),
-                              os.path.join(BASE_DIR, "my_devices.py")],
-                             cwd=BASE_DIR, creationflags=0x00000008)
-            self.log("已打开简洁界面")
-        except Exception as e:
-            self.log(f"打开界面失败：{e}")
+        if tc.start_ui():
+            self.log("面板已打开/前置")
+        else:
+            self.log("打开面板失败")
 
     def quit(self) -> None:
+        if self.closing:
+            return
+        self.closing = True
         self.log("退出")
+        self.stop_event.set()
         self.remove_icons()
         try:
             win_icon.destroy_all()
-            win_icon.cleanup_files()
         except Exception:
-            self.log("清理图标时出错（忽略）：\n" + traceback.format_exc())
+            self.log("清理图标出错（忽略）:\n" + traceback.format_exc())
         if self.hwnd:
-            # DestroyWindow 会触发 WM_DESTROY -> PostQuitMessage，消息循环随之结束
+            USER32.KillTimer(self.hwnd, 1)
             USER32.DestroyWindow(self.hwnd)
+            self.hwnd = None
+        if self.worker and self.worker.is_alive():
+            self.worker.join(timeout=3.0)
 
-    # ---- 窗口过程 -------------------------------------------------------
+    # ---- window proc ----
     def wnd_proc(self, hwnd, msg, wparam, lparam):
         if msg == MSG_TRAY_CALLBACK:
             event = int(lparam) & 0xFFFF
             if event == WM_RBUTTONUP:
-                self.open_ui()                     # 右键：直接打开界面
+                self.open_ui()
             elif event in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
-                self.refresh_now()                 # 左键：立刻刷新
+                self.refresh_now()
             return 0
         if msg == MSG_REFRESH_DONE:
             self.on_refresh_done()
             return 0
         if msg == WM_TIMER:
-            self.apply_config()                    # 顺手同步一下界面里改的设置
+            self.apply_config()
             self.refresh_now()
             return 0
-        if msg == self.msg_quit:
+        if msg in (self.msg_quit, WM_CLOSE):
             self.quit()
             return 0
         if msg == self.msg_reload:
             self.apply_config()
             return 0
         if msg == self.taskbar_created_msg:
-            self.log("任务栏重建，重新添加图标")
+            self.icons_added = False
             self.add_icons()
             return 0
         if msg == WM_DESTROY:
-            # 重要：销毁窗口后必须让消息循环退出，否则进程会残留成"僵尸"
-            # ——它已经没有窗口/图标了，却还占着单实例锁，导致托盘再也起不来。
+            # Without this, a destroyed window leaves a live process holding
+            # the single-instance mutex, and the tray can never start again.
             USER32.PostQuitMessage(0)
             return 0
         return USER32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
-    # ---- 启动 ----------------------------------------------------------
     def run(self) -> int:
         hinst = KERNEL32.GetModuleHandleW(None)
         self.wndproc_ref = WNDPROC(self.wnd_proc)
@@ -391,60 +326,55 @@ class TrayApp:
             if err not in (0, 1410):
                 self.log(f"RegisterClassExW 失败 err={err}")
                 return 1
-
         hwnd = USER32.CreateWindowExW(0, WND_CLASS, APP_NAME, 0, 0, 0, 0, 0,
                                       None, None, hinst, None)
         if not hwnd:
             self.log(f"CreateWindowExW 失败 err={ctypes.get_last_error()}")
             return 1
         self.hwnd = hwnd
-
         self.add_icons()
         self.apply_config()
         self.apply_timer()
         self.refresh_now()
-
-        msg = MSG()
-        while USER32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            USER32.TranslateMessage(ctypes.byref(msg))
-            USER32.DispatchMessageW(ctypes.byref(msg))
+        message = MSG()
+        while USER32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+            USER32.TranslateMessage(ctypes.byref(message))
+            USER32.DispatchMessageW(ctypes.byref(message))
         self.log("消息循环结束")
         return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="托盘电量监视器")
-    parser.add_argument("--debug", action="store_true", help="前台运行并输出日志")
+    parser = argparse.ArgumentParser(description="三设备电量托盘")
+    parser.add_argument("--debug", action="store_true", help="前台运行并打印过程")
     parser.add_argument("--status", action="store_true", help="打印当前状态")
-    parser.add_argument("--quit", action="store_true", help="让正在运行的实例退出")
+    parser.add_argument("--quit", action="store_true", help="让运行中的托盘退出")
     args = parser.parse_args()
 
     if args.status:
         print("配置：", json.dumps(tc.load_config(), ensure_ascii=False))
         print("开机自启：", tc.is_autostart_enabled())
-        print("启动命令：", tc.autostart_command())
-        print("托盘是否在运行：", tc.is_tray_running())
+        print("托盘运行中：", tc.is_tray_running())
         return 0
     if args.quit:
         ok = tc.post_to_tray(tc.MSG_QUIT)
         print("已通知托盘退出" if ok else "托盘没在运行")
-        return 0
+        return 0 if ok else 1
 
-    # 单实例
-    KERNEL32.CreateMutexW(None, False, MUTEX_NAME)
-    if ctypes.get_last_error() == 183:
+    handle, first = tc.acquire_instance(MUTEX_NAME)
+    if not first:
+        tc.close_instance(handle)
         if tc.is_tray_running():
-            # 真有一个正常实例在跑：让它重读配置
             tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（托盘里两个数字图标就是它；右键图标打开界面）")
+            print("已经在运行了（右键托盘图标可打开面板）")
             return 0
-        # 有人占着锁但已经没有窗口 —— 上一版留下的僵尸进程，清掉后继续启动
-        tc.cleanup_zombie()
-
-    tc.write_pid()
+        # The mutex is orphaned (previous process died). Never kill unknown
+        # processes; report honestly and let the user retry.
+        print("检测到托盘单实例锁被占用，但没有托盘窗口。请稍后重试。")
+        return 1
 
     try:
-        USER32.SetProcessDPIAware()            # 图标不糊
+        USER32.SetProcessDPIAware()
     except Exception:
         pass
 
@@ -455,7 +385,8 @@ def main() -> int:
         traceback.print_exc()
         return 1
     finally:
-        tc.remove_pid()
+        app.stop_event.set()
+        tc.close_instance(handle)
 
 
 if __name__ == "__main__":
