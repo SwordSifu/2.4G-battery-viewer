@@ -19,35 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-================================================================================
-适用范围 / Scope
-================================================================================
-
-上面这份 MIT 许可证，只覆盖本仓库中由 SwordSifu 原创的部分，即相对上游基线
-commit f0e983e 新增或改写的代码与文档，包括但不限于：
-
-  personal_hid.py
-  personal_devices.py
-  tests/test_personal_protocol.py
-  my_devices.py、tray_app.py、tray_common.py、win_icon.py 的改写部分
-  README.md 的改写部分
-  我的设备电量.bat、电量托盘.bat
-
-以下文件来自上游 yszyszysz233/2.4G-battery-viewer，**不在本许可证覆盖范围内**。
-它们在上游仓库中没有附带任何开源许可证，上游 README 注明“仅供学习与个人使用”：
-
-  app.py
-  battery.py
-  bt_battery.py
-  darkrim_proto.py
-  hid_win.py
-  win_link.py
-  win_shell.py
-  PROMPT.md
-  .gitignore
-  运行my_devices
-
-换句话说：本许可证不能、也没有替上游代码授予任何权利。如果你要把本项目整体
-再分发或商用，上游那部分代码的授权需要另外向上游作者取得。
-如果将来上游补上了许可证，请以上游的许可证为准。

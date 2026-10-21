@@ -88,7 +88,7 @@ python tray_app.py --quit
   上游**没有附带开源许可证**，README 注明“仅供学习与个人使用”。
   因此这部分不随本仓库的 MIT 授权，整体再分发或商用请另行取得上游授权。
 
-详细划分见 [LICENSE](LICENSE) 末尾的“适用范围 / Scope”一节。
+详细划分见 [NOTICE](NOTICE)。
 
 ## 说明
 

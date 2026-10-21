@@ -1,0 +1,55 @@
+本项目的许可证适用范围
+========================
+
+本仓库包含两部分代码，授权状态不同。**请不要把整份 LICENSE 当成对所有文件的授权。**
+
+
+一、SwordSifu 原创部分 —— MIT，见 LICENSE
+-----------------------------------------
+
+相对上游基线 commit f0e983e 新增或改写的代码与文档：
+
+  personal_hid.py
+  personal_devices.py
+  tests/test_personal_protocol.py
+  my_devices.py                  （改写）
+  tray_app.py                    （改写）
+  tray_common.py                 （改写）
+  win_icon.py                    （改写部分）
+  README.md                      （改写部分）
+  我的设备电量.bat
+  电量托盘.bat
+
+这些文件按仓库根目录的 LICENSE（MIT）授权。
+
+
+二、来自上游的部分 —— 无开源许可证，不在本许可范围内
+-----------------------------------------------------
+
+来自 yszyszysz233/2.4G-battery-viewer：
+
+  app.py
+  battery.py
+  bt_battery.py
+  darkrim_proto.py
+  hid_win.py
+  win_link.py
+  win_shell.py
+  PROMPT.md
+  .gitignore
+  运行my_devices
+
+上游仓库**没有附带任何开源许可证**，其 README 注明“仅供学习与个人使用”。
+因此这些文件不随本仓库的 MIT 授权，本许可证也不能、也没有替上游代码授予任何权利。
+
+如需整体再分发或商用，上游那部分代码的授权须另行向上游作者取得。
+如果上游将来补充了许可证，以上游的许可证为准。
+
+
+三、其它
+--------
+
+- 私有设备协议信息来自对本机已安装厂商软件的静态分析加真机只读验证，
+  不包含任何厂商二进制文件或反编译产物。
+- 本项目与 VXE / ATK、洛斐（Lofree）、八位堂（8BitDo）均无关联，
+  未获其背书。
