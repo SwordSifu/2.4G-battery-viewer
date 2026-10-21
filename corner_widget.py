@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import ctypes
+import time
 from ctypes import wintypes
 
 import ring_render as rr
@@ -131,7 +132,27 @@ user32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT,
 user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
 user32.SetCapture.argtypes = [ctypes.c_void_p]
 user32.ReleaseCapture.restype = wintypes.BOOL
-user32.TrackPopupMenu.restype = wintypes.BOOL
+# TPM_RETURNCMD returns a command id; handles must retain pointer width.
+user32.TrackPopupMenu.restype = wintypes.UINT
+user32.TrackPopupMenu.argtypes = [ctypes.c_void_p, wintypes.UINT,
+                                  ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                  ctypes.c_void_p, ctypes.POINTER(RECT)]
+user32.ValidateRect.restype = wintypes.BOOL
+user32.ValidateRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(RECT)]
+user32.PostMessageW.restype = wintypes.BOOL
+user32.PostMessageW.argtypes = [ctypes.c_void_p, wintypes.UINT,
+                               ctypes.c_size_t, ctypes.c_ssize_t]
+user32.SetTimer.restype = ctypes.c_size_t
+user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                            wintypes.UINT, ctypes.c_void_p]
+user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+user32.EndMenu.restype = wintypes.BOOL
+user32.EndMenu.argtypes = []
+user32.LoadCursorW.restype = ctypes.c_void_p
+user32.LoadCursorW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 user32.CreatePopupMenu.restype = ctypes.c_void_p
 user32.AppendMenuW.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_size_t,
                                wintypes.LPCWSTR]
@@ -156,9 +177,14 @@ MF_SEPARATOR = 0x0800
 MF_CHECKED = 0x0008
 TPM_RIGHTBUTTON = 0x0002
 TPM_RETURNCMD = 0x0100
+# 菜单超出屏幕时用来翻转展开方向：靠下向上展开、靠右向左展开
+TPM_RIGHTALIGN = 0x0008
+TPM_BOTTOMALIGN = 0x0020
 GWL_EXSTYLE = -20
 RGN_OR = 2
 TIMER_KEEPALIVE = 1
+TIMER_RESTORE = 2
+MSG_RESTORE = WM_APP + 20
 GW_HWNDPREV = 3
 # 前台窗口切换事件：任务栏被点击/激活时触发，用它来补重传画面比轮询省得多
 EVENT_SYSTEM_FOREGROUND = 0x0003
@@ -179,9 +205,8 @@ def work_area() -> tuple:
 def taskbar_rect():
     """任务栏条 (left, top, right, bottom)。
 
-    注意：本进程是 DPI-unaware 时，这里拿到的是虚拟化后的逻辑坐标。
-    调用方必须按 _dpi_scale() 换算到物理像素，否则高度会缩水一半。
-    取不到返回 None。
+    使用当前进程 DPI 上下文的屏幕坐标；托盘入口设置 DPI-aware，
+    本机此时返回物理像素。不要另乘一次缩放系数。取不到返回 None。
     """
     try:
         user32.FindWindowW.restype = ctypes.c_void_p
@@ -201,10 +226,9 @@ def taskbar_rect():
 
 
 def physical_taskbar_band() -> tuple:
-    """返回物理像素下的 (x, y, height)，浮窗应贴在任务栏的哪一条。
+    """返回任务栏内的 (x, y, height)，与窗口使用相同 DPI 坐标系。
 
-    窗口是 DPI-unaware 的，UpdateLayeredWindow 的位置和尺寸也按虚拟化
-    坐标解释，因此这里把任务栏的真实高度换算成逻辑单位后使用。
+    不混用物理/虚拟化坐标，也不对 GetWindowRect 的结果重复缩放。
     """
     tb = taskbar_rect()
     if tb is None:
@@ -260,13 +284,24 @@ class CornerWidget:
         self._hook = None
         self._hook_proc = None
         self._last_submit = 0.0
+        self._visible = True
+        self._shown = False
+        self._destroyed = False
+        self._menu_active = False
+        self._paint_pending = False
+        self._restore_remaining = 0
+
+    def _can_present(self) -> bool:
+        return bool(self.hwnd and self._visible and not self._destroyed
+                    and not self._menu_active)
 
     # ---- 创建 / 销毁 ----
     def create(self, hinst=None) -> bool:
-        hinst = hinst or ctypes.WinDLL("kernel32").GetModuleHandleW(None)
+        hinst = hinst or kernel32.GetModuleHandleW(None)
         self.wndproc_ref = WNDPROC(self._wnd_proc)
         wc = WNDCLASSEXW()
         wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+        wc.style = 0x0008  # CS_DBLCLKS
         wc.lpfnWndProc = self.wndproc_ref
         wc.hInstance = hinst
         wc.lpszClassName = self.WND_CLASS
@@ -289,13 +324,21 @@ class CornerWidget:
         return True
 
     def destroy(self) -> None:
-        if self._menu:
-            user32.DestroyMenu(self._menu)
-            self._menu = None
+        if self._destroyed:
+            return
+        self._destroyed = True
+        self._visible = False
         self._stop_keepalive()
         if self.hwnd:
+            user32.KillTimer(self.hwnd, TIMER_RESTORE)
+            self._restore_remaining = 0
+            if self._menu_active:
+                # TrackPopupMenu owns the nested loop; its finally block frees
+                # the menu after EndMenu returns, avoiding double destruction.
+                user32.EndMenu()
             user32.DestroyWindow(self.hwnd)
             self.hwnd = None
+        self._surface = None
 
     # ---- 绘制 ----
     def _taskbar_band(self) -> tuple:
@@ -353,8 +396,10 @@ class CornerWidget:
 
     def _paint(self) -> None:
         """渲染并提交画面。渲染结果会缓存，重复提交走 _resubmit。"""
-        if not self.hwnd:
+        if not self._can_present():
+            self._paint_pending = True
             return
+        self._paint_pending = False
         scale = _dpi_scale(self.hwnd)
         x0, y0, band_h = self._taskbar_band()
         # 与任务栏同色：底板用采样色，几乎是实色，环直接浮在任务栏上
@@ -373,14 +418,18 @@ class CornerWidget:
             return
         self._surface = (data, w, h, band_h)
         self._submit(data, w, h, x0, y0)
+        if not self._shown:
+            user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+            self._shown = True
+            self.raise_to_top()
 
     def _resubmit(self) -> bool:
         """用缓存的位图重新提交一次，不重新渲染（亚毫秒级）。
 
-        弹出菜单 / 任务栏激活会让分层窗口的画面被清掉，重新渲染要 ~30ms，
-        频繁做会吃 CPU；这里只重传已渲染好的像素。
+        菜单关闭 / 任务栏激活后的有界恢复复用缓存，避免重复采样底色和渲染。
+        此方法本身不显示窗口，也不改变 Z 序。
         """
-        if not self.hwnd or not self._surface:
+        if not self._can_present() or not self._surface:
             return False
         data, w, h, band_h = self._surface
         x0, y0, _ = self._taskbar_band()
@@ -388,6 +437,8 @@ class CornerWidget:
         return True
 
     def _submit(self, data, w: int, h: int, x0: int, y0: int) -> None:
+        if not self._can_present():
+            return
         hdc_screen = user32.GetDC(None)
         hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
         bmi = BITMAPINFOHEADER()
@@ -411,15 +462,18 @@ class CornerWidget:
             pt_dst = POINT(x, y)
             size = SIZE(w, h)
             src = POINT(0, 0)
-            user32.UpdateLayeredWindow(self.hwnd, hdc_screen, ctypes.byref(pt_dst),
-                                       ctypes.byref(size), hdc_mem, ctypes.byref(src),
-                                       0, ctypes.byref(self._blend), ULW_ALPHA)
+            if not user32.UpdateLayeredWindow(
+                    self.hwnd, hdc_screen, ctypes.byref(pt_dst),
+                    ctypes.byref(size), hdc_mem, ctypes.byref(src),
+                    0, ctypes.byref(self._blend), ULW_ALPHA):
+                raise ctypes.WinError(ctypes.get_last_error())
+            resized = (self.width, self.height) != (w, h)
             self.width, self.height = w, h
-            # 必须先把窗口摆到最终尺寸，再设区域：窗口还小的时候设区域，
-            # 超出窗口的部分会被丢掉，结果可见区域几乎为空、也收不到点击。
-            user32.SetWindowPos(self.hwnd, ctypes.c_void_p(HWND_TOPMOST), x, y, w, h,
-                                SWP_NOACTIVATE | SWP_SHOWWINDOW)
-            self._apply_hit_region(w, h)
+            # Uploading pixels must NOT implicitly show or raise the owner.
+            # TrackPopupMenu pumps our timer/refresh messages while it is open.
+            if resized:
+                self._apply_hit_region(w, h)
+            self._last_submit = time.monotonic()
         finally:
             gdi32.SelectObject(hdc_mem, old)
             gdi32.DeleteObject(hbmp)
@@ -429,10 +483,9 @@ class CornerWidget:
     def _target_xy(self, w: int, h: int, default_x: int, default_y: int) -> tuple:
         """锁定/默认时贴任务栏；解锁且有保存位置时用保存位置。
 
-        注意坐标系：self.position 是**物理像素**（窗口是 DPI-aware 的），
-        而 work_area() / taskbar_rect() 返回的是**虚拟化逻辑坐标**。
-        拿逻辑坐标去校验物理坐标，任何拖动位置都会被判为越界然后弹回默认位，
-        所以这里必须用 GetSystemMetrics（DPI-aware，物理像素）做边界检查。
+        托盘入口启用 DPI-aware，保存位置、GetSystemMetrics 及任务栏矩形
+        均沿用该上下文的屏幕坐标；用完整屏幕范围校验，不用工作区边界
+        排除任务栏内的合法位置。这里只处理主屏幕范围。
         """
         if self.position is not None and not self.locked:
             px, py = self.position
@@ -449,22 +502,28 @@ class CornerWidget:
 
     def update(self, readings) -> None:
         self.readings = list(readings)
-        self._paint()
-        if self.hwnd:
+        self._paint_pending = True
+        if self._can_present():
+            self._paint()
             self._start_keepalive()
 
     def show(self) -> None:
-        if self.hwnd:
-            user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+        if self.hwnd and not self._destroyed:
+            self._visible = True
             self._paint()
             self._start_keepalive()
 
     def hide(self) -> None:
+        self._visible = False
+        self._shown = False
+        self._restore_remaining = 0
+        self._stop_keepalive()
         if self.hwnd:
+            user32.KillTimer(self.hwnd, TIMER_RESTORE)
             user32.ShowWindow(self.hwnd, SW_HIDE)
 
     def refresh_position(self) -> None:
-        if self.hwnd and self.width:
+        if self._can_present() and self.width:
             x0, y0, _band = self._taskbar_band()
             x, y = self._target_xy(self.width, self.height, x0, y0)
             user32.SetWindowPos(self.hwnd, ctypes.c_void_p(HWND_TOPMOST), x, y, 0, 0,
@@ -477,7 +536,7 @@ class CornerWidget:
         下面。这里每次调用都很便宜（同一 topmost 组内重排），但真正触发
         条件的判断在 _keepalive_tick 里做。
         """
-        if self.hwnd:
+        if self._can_present():
             user32.SetWindowPos(self.hwnd, ctypes.c_void_p(HWND_TOPMOST), 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
@@ -514,18 +573,14 @@ class CornerWidget:
         事件驱动，空闲时零开销。但前台事件可能很频繁，所以做 250ms 节流，
         避免每次切换都重传整张位图导致 CPU 偏高。
         """
-        try:
-            now = time.monotonic()
-            if now - getattr(self, "_last_submit", 0.0) < 0.25:
-                return
-            if not self.hwnd:
-                return
-            self._last_submit = now
-            self._resubmit()
-            if self._is_covered_by_taskbar():
-                self.raise_to_top()
-        except Exception:
-            pass
+        if not self._can_present():
+            return
+        now = time.monotonic()
+        if now - self._last_submit < 0.25:
+            return
+        # Defer until foreground activation has completed. Never re-enter
+        # rendering from a WinEvent callback or while a native menu is open.
+        user32.PostMessageW(self.hwnd, MSG_RESTORE, 0, 0)
 
     def _start_foreground_hook(self) -> None:
         if self._hook or not self.hwnd:
@@ -540,7 +595,8 @@ class CornerWidget:
                 self._hook_proc = WINEVENTPROC(self._on_foreground_change)
             self._hook = user32.SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None,
-                self._hook_proc, 0, 0, WINEVENT_OUTOFCONTEXT)
+                self._hook_proc, 0, 0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)
         except Exception:
             self._hook = None
 
@@ -552,30 +608,48 @@ class CornerWidget:
                 pass
             self._hook = None
 
-    def _keepalive_tick(self) -> None:
-        """兜底定时器：重传缓存位图（不重新渲染），必要时补置顶。
-
-        实测：右键菜单关闭 + 点击任务栏之后，分层窗口的 z 序和可见性都正常，
-        但画面会被系统清空，而且没有任何事件通知我们。只能靠周期性重传来恢复。
-        重传走缓存的像素（约 1ms），渲染仍只在数据变化时做。
-        """
-        if not self.hwnd:
+    def _schedule_restore(self) -> None:
+        """A bounded recovery burst after activation/menu dismissal, not polling."""
+        if not self._can_present():
             return
-        self._resubmit()
+        if self._restore_remaining:
+            return
+        self._restore_remaining = 3
+        if not user32.SetTimer(self.hwnd, TIMER_RESTORE, 80, None):
+            self._restore_remaining = 0
+
+    def _restore_tick(self) -> None:
+        if not self._can_present():
+            if self.hwnd:
+                user32.KillTimer(self.hwnd, TIMER_RESTORE)
+            self._restore_remaining = 0
+            return
+        if self._restore_remaining <= 0:
+            user32.KillTimer(self.hwnd, TIMER_RESTORE)
+            return
+        self._restore_remaining -= 1
+        if not self._restore_remaining:
+            user32.KillTimer(self.hwnd, TIMER_RESTORE)
+        self.raise_to_top()
+        if self._paint_pending:
+            self._paint()
+        else:
+            self._resubmit()
+
+    def _keepalive_tick(self) -> None:
+        """Low-frequency fallback, completely suspended during native menus."""
+        if not self._can_present():
+            return
         if self._is_covered_by_taskbar():
-            self.raise_to_top()
+            self._schedule_restore()
 
     def _start_keepalive(self) -> None:
         """前台事件钩子 + 低频兜底定时器。"""
-        if not self.hwnd:
+        if not self._can_present():
             return
         self._start_foreground_hook()
-        user32.SetTimer.restype = ctypes.c_size_t
-        user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
-                                    wintypes.UINT, ctypes.c_void_p]
-        user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-        # 500ms：画面被系统清空后最多半秒内恢复；重传用缓存，开销很小
-        user32.SetTimer(self.hwnd, TIMER_KEEPALIVE, 500, None)
+        # No uploads on an idle timer. Activation/menu events do bounded work.
+        user32.SetTimer(self.hwnd, TIMER_KEEPALIVE, 1500, None)
 
     def _stop_keepalive(self) -> None:
         self._stop_foreground_hook()
@@ -589,60 +663,71 @@ class CornerWidget:
 
     # ---- 菜单 ----
     def _show_menu(self) -> None:
-        ids = {"refresh": 1, "tray": 2, "hide": 3, "panel": 4, "lock": 5,
-               "int30": 10, "int60": 11, "int120": 12, "int300": 13, "quit": 90}
+        if not self._can_present():
+            return
         menu = user32.CreatePopupMenu()
         if not menu:
             return
         self._menu = menu
-        user32.AppendMenuW(menu, MF_STRING, ids["refresh"], "立即刷新")
-        user32.AppendMenuW(menu, MF_STRING, ids["panel"], "打开详细面板")
-        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+        self._menu_active = True
         try:
-            current = int(self.interval_getter())
-        except Exception:
-            current = 60
-        user32.AppendMenuW(menu, MF_STRING, ids["lock"],
-                           "解锁位置（可拖动）" if self.locked else "锁定位置")
-        for key, secs, label in (("int30", 30, "30 秒"), ("int60", 60, "1 分钟"),
-                                 ("int120", 120, "2 分钟"), ("int300", 300, "5 分钟")):
-            flags = MF_STRING | (MF_CHECKED if current == secs else 0)
-            user32.AppendMenuW(menu, flags, ids[key], "刷新间隔：" + label)
-        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, MF_STRING, ids["tray"],
-                           "显示托盘图标" if False else "托盘图标开关")
-        user32.AppendMenuW(menu, MF_STRING, ids["hide"], "隐藏此浮窗")
-        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(menu, MF_STRING, ids["quit"], "退出电量托盘")
-        pt = POINT()
-        user32.GetCursorPos(ctypes.byref(pt))
-        # 必须先成为前台窗口，否则点菜单外部时菜单不会消失
-        user32.SetForegroundWindow(self.hwnd)
-        cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
-                                    pt.x, pt.y, 0, self.hwnd, None)
-        user32.DestroyMenu(menu)
-        self._menu = None
-        # 菜单关闭的瞬间任务栏会变成前台窗口并把自己抬到 topmost 组最前，
-        # 我们随即被压到下面。这里立即重绘并重新置顶，否则要等到下一次
-        # 数据刷新（默认 60 秒）才会恢复，表现出来就是"环消失了"。
-        self.raise_to_top()
-        self._paint()
-        if cmd == ids["refresh"]:
-            self.on_refresh()
-        elif cmd == ids["panel"]:
-            self.on_open_panel()
-        elif cmd == ids["lock"]:
-            self.on_toggle_lock()
-        elif cmd == ids["tray"]:
-            self.on_toggle_tray()
-        elif cmd == ids["hide"]:
-            self.on_hide()
-        elif cmd == ids["quit"]:
-            self.on_quit()
-        elif cmd in (ids["int30"], ids["int60"], ids["int120"], ids["int300"]):
-            secs = {ids["int30"]: 30, ids["int60"]: 60,
-                    ids["int120"]: 120, ids["int300"]: 300}[cmd]
-            self.on_interval_change(secs)
+            # TrackPopupMenu runs a nested message loop: suspend maintenance and
+            # guard ALL presentation paths, including refresh/paint callbacks.
+            self._stop_keepalive()
+            user32.KillTimer(self.hwnd, TIMER_RESTORE)
+            self._restore_remaining = 0
+            user32.AppendMenuW(menu, MF_STRING, 1, "立即刷新")
+            user32.AppendMenuW(menu, MF_STRING, 4, "打开详细面板")
+            user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+            try:
+                current = int(self.interval_getter())
+            except Exception:
+                current = 60
+            user32.AppendMenuW(menu, MF_STRING, 5,
+                               "解锁位置（可拖动）" if self.locked else "锁定位置")
+            intervals = {10: 30, 11: 60, 12: 120, 13: 300}
+            for cmd_id, label in ((10, "30 秒"), (11, "1 分钟"),
+                                  (12, "2 分钟"), (13, "5 分钟")):
+                flags = MF_STRING | (MF_CHECKED if current == intervals[cmd_id] else 0)
+                user32.AppendMenuW(menu, flags, cmd_id, "刷新间隔：" + label)
+            user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+            user32.AppendMenuW(menu, MF_STRING, 2, "托盘图标开关")
+            user32.AppendMenuW(menu, MF_STRING, 3, "隐藏此浮窗")
+            user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+            user32.AppendMenuW(menu, MF_STRING, 90, "退出电量托盘")
+            pt = POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            flags = TPM_RIGHTBUTTON | TPM_RETURNCMD
+            if pt.y > user32.GetSystemMetrics(1) // 2:
+                flags |= TPM_BOTTOMALIGN
+            if pt.x > user32.GetSystemMetrics(0) // 2:
+                flags |= TPM_RIGHTALIGN
+            user32.SetForegroundWindow(self.hwnd)
+            cmd = user32.TrackPopupMenu(menu, flags, pt.x, pt.y, 0, self.hwnd, None)
+            # A nested callback may already have destroyed the owner.
+            if self._destroyed or not self.hwnd:
+                return
+            # Execute hide/quit BEFORE any restoration. Other callbacks may
+            # update readings; keep those deferred until the menu lifecycle ends.
+            actions = {1: self.on_refresh, 2: self.on_toggle_tray,
+                       3: self.on_hide, 4: self.on_open_panel,
+                       5: self.on_toggle_lock, 90: self.on_quit}
+            if cmd in actions:
+                actions[cmd]()
+            elif cmd in intervals:
+                self.on_interval_change(intervals[cmd])
+        finally:
+            try:
+                user32.DestroyMenu(menu)
+            finally:
+                self._menu = None
+                self._menu_active = False
+                if self.hwnd and not self._destroyed:
+                    # Required for reliable subsequent notification-area menus.
+                    user32.PostMessageW(self.hwnd, 0, 0, 0)  # WM_NULL
+                if self._can_present():
+                    self._start_keepalive()
+                    self._schedule_restore()
 
     # ---- 命中区域：只有三个环的圆形区域接受点击 ----
     def _apply_hit_region(self, w: int, h: int) -> None:
@@ -699,10 +784,23 @@ class CornerWidget:
         if msg == WM_TIMER:
             if int(wparam) == TIMER_KEEPALIVE:
                 self._keepalive_tick()
+            elif int(wparam) == TIMER_RESTORE:
+                self._restore_tick()
+            return 0
+        if msg == MSG_RESTORE:
+            self._schedule_restore()
             return 0
         if msg == WM_PAINT:
-            self._paint()
+            # Layered pixels are supplied by UpdateLayeredWindow, not a paint
+            # DC. Validate even while hidden/menu-active to avoid a paint loop.
+            user32.ValidateRect(hwnd, None)
+            if self._paint_pending or not self._surface:
+                self._paint()
+            else:
+                self._resubmit()
             return 0
+        if msg == 0x0021:  # WM_MOUSEACTIVATE: accept clicks without activation
+            return 3  # MA_NOACTIVATE
         if msg == WM_ERASEBKGND:
             return 1
         if msg == WM_LBUTTONDBLCLK:
@@ -737,7 +835,22 @@ class CornerWidget:
         if msg == WM_RBUTTONUP:
             self._show_menu()
             return 0
+        if msg == WM_CLOSE:
+            self.destroy()
+            return 0
         if msg == WM_DESTROY:
+            # Also cover external DestroyWindow, not only our destroy() path.
+            if not self._destroyed:
+                self._destroyed = True
+                self._visible = False
+                self._stop_keepalive()
+                user32.KillTimer(hwnd, TIMER_RESTORE)
+                if self._menu_active:
+                    user32.EndMenu()
+            self._shown = False
+            self._restore_remaining = 0
+            self._surface = None
+            self.hwnd = None
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
