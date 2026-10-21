@@ -158,6 +158,7 @@ TPM_RIGHTBUTTON = 0x0002
 TPM_RETURNCMD = 0x0100
 GWL_EXSTYLE = -20
 RGN_OR = 2
+TIMER_KEEPALIVE = 1
 
 
 def work_area() -> tuple:
@@ -261,8 +262,10 @@ class CornerWidget:
             if ctypes.get_last_error() not in (0, 1410):
                 return False
         ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
-        # 浮窗贴在任务栏上，必须主动处理点击穿透：只有落在环上的点击
-        # 才由我们响应，其余交给下层任务栏（开始按钮/搜索）。
+        # 只靠 SetWindowRgn 裁剪可点击区域：区域之外系统根本不会把点击
+        # 投给我们，自然穿透到任务栏。
+        # 绝对不要加 WS_EX_TRANSPARENT：那个标志会让窗口完全收不到鼠标
+        # 消息，表现为"环就在那里，但点了没反应、像消失了一样"。
         ex |= WS_EX_NOACTIVATE
         hwnd = user32.CreateWindowExW(ex, self.WND_CLASS, "personal-battery-corner",
                                       WS_POPUP, 0, 0, 10, 10, None, None, hinst, None)
@@ -270,28 +273,13 @@ class CornerWidget:
             return False
         self.hwnd = hwnd
         self.width = self.height = 0
-        # 默认整窗穿透，光标移动时再按位置动态切换
-        self._set_click_through(True)
         return True
-
-    def _set_click_through(self, through: bool) -> None:
-        """切换 WS_EX_TRANSPARENT；通过 GetWindowLong/SetWindowLong 原地改样式。"""
-        if not self.hwnd:
-            return
-        user32.GetWindowLongW.restype = wintypes.LONG
-        user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        user32.SetWindowLongW.restype = wintypes.LONG
-        user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.LONG]
-        ex = user32.GetWindowLongW(self.hwnd, GWL_EXSTYLE) & 0xFFFFFFFF
-        new = (ex | WS_EX_TRANSPARENT) if through else (ex & ~WS_EX_TRANSPARENT)
-        if new != ex:
-            user32.SetWindowLongW(self.hwnd, GWL_EXSTYLE, new)
-        self._click_through = through
 
     def destroy(self) -> None:
         if self._menu:
             user32.DestroyMenu(self._menu)
             self._menu = None
+        self._stop_keepalive()
         if self.hwnd:
             user32.DestroyWindow(self.hwnd)
             self.hwnd = None
@@ -346,10 +334,11 @@ class CornerWidget:
                                        ctypes.byref(size), hdc_mem, ctypes.byref(src),
                                        0, ctypes.byref(self._blend), ULW_ALPHA)
             self.width, self.height = w, h
-            # 先裁好可点击区域，再摆位置显示
-            self._apply_hit_region(w, h)
+            # 必须先把窗口摆到最终尺寸，再设区域：窗口还小的时候设区域，
+            # 超出窗口的部分会被丢掉，结果可见区域几乎为空、也收不到点击。
             user32.SetWindowPos(self.hwnd, ctypes.c_void_p(HWND_TOPMOST), x, y, w, h,
                                 SWP_NOACTIVATE | SWP_SHOWWINDOW)
+            self._apply_hit_region(w, h)
         finally:
             gdi32.SelectObject(hdc_mem, old)
             gdi32.DeleteObject(hbmp)
@@ -375,11 +364,14 @@ class CornerWidget:
     def update(self, readings) -> None:
         self.readings = list(readings)
         self._paint()
+        if self.hwnd:
+            self._start_keepalive()
 
     def show(self) -> None:
         if self.hwnd:
             user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
             self._paint()
+            self._start_keepalive()
 
     def hide(self) -> None:
         if self.hwnd:
@@ -387,9 +379,34 @@ class CornerWidget:
 
     def refresh_position(self) -> None:
         if self.hwnd and self.width:
-            x, y = self._target_xy(self.width, self.height)
+            x0, y0, _band = self._taskbar_band()
+            x, y = self._target_xy(self.width, self.height, x0, y0)
             user32.SetWindowPos(self.hwnd, ctypes.c_void_p(HWND_TOPMOST), x, y, 0, 0,
                                 SWP_NOSIZE | SWP_NOACTIVATE)
+
+    def raise_to_top(self) -> None:
+        """重新抢回 topmost 的 Z 序。
+
+        任务栏被点击/激活后会把自己的 topmost 顺序前移，把我们的浮窗压到
+        下面。定时刷新时再抬一次，保证环始终可见。
+        """
+        if self.hwnd:
+            user32.SetWindowPos(self.hwnd, ctypes.c_void_p(HWND_TOPMOST), 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+
+    def _start_keepalive(self) -> None:
+        """用系统定时器维持 Z 序；浮窗是独立窗口，收自己的 WM_TIMER。"""
+        if not self.hwnd:
+            return
+        user32.SetTimer.restype = ctypes.c_size_t
+        user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                    wintypes.UINT, ctypes.c_void_p]
+        user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+        user32.SetTimer(self.hwnd, TIMER_KEEPALIVE, 2000, None)
+
+    def _stop_keepalive(self) -> None:
+        if self.hwnd:
+            user32.KillTimer(self.hwnd, TIMER_KEEPALIVE)
 
     def set_locked(self, locked: bool) -> None:
         self.locked = locked
@@ -452,41 +469,58 @@ class CornerWidget:
     def _apply_hit_region(self, w: int, h: int) -> None:
         """用 SetWindowRgn 把可点击范围限制在三个环上。
 
-        区域之外的像素对系统来说根本不存在，点击会自动落到任务栏上，
-        因此不会挡住开始按钮/搜索。这比动态切换 WS_EX_TRANSPARENT 可靠：
-        透明窗口收不到鼠标消息，切过去就切不回来了。
+        注意：CreateEllipticRgn / CombineRgn 属于 **gdi32**，不是 user32。
+        从 user32 取它们会抛 AttributeError；如果再用 except: pass 兜住，
+        表面看没报错，实际区域根本没设上，窗口就收不到任何点击。
         """
+        if not self.hwnd:
+            return
         try:
-            user32.CreateEllipticRgn.restype = ctypes.c_void_p
-            user32.CreateEllipticRgn.argtypes = [ctypes.c_int] * 4
-            user32.CombineRgn.restype = ctypes.c_int
-            user32.CombineRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                          ctypes.c_void_p, ctypes.c_int]
+            gdi32.CreateEllipticRgn.restype = ctypes.c_void_p
+            gdi32.CreateEllipticRgn.argtypes = [ctypes.c_int] * 4
+            gdi32.CombineRgn.restype = ctypes.c_int
+            gdi32.CombineRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                         ctypes.c_void_p, ctypes.c_int]
             user32.SetWindowRgn.restype = ctypes.c_int
-            user32.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL]
-            user32.DeleteObject.argtypes = [ctypes.c_void_p]
+            user32.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                            wintypes.BOOL]
+            gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
             geo = rr.panel_geometry(_dpi_scale(None), h)
             pad = max(2, int(round(geo["thickness"] * 0.55)))
             total = None
             for cx in geo["centers"]:
                 r = int(round(geo["radius"] + pad))
                 x, y = int(round(cx)), int(round(geo["cy"]))
-                piece = user32.CreateEllipticRgn(x - r, y - r, x + r, y + r)
+                piece = gdi32.CreateEllipticRgn(x - r, y - r, x + r, y + r)
                 if not piece:
                     continue
                 if total is None:
                     total = piece
                 else:
-                    user32.CombineRgn(total, total, piece, RGN_OR)
-                    user32.DeleteObject(piece)
-            if total:
-                # SetWindowRgn 成功后由系统接管该 region 的生命周期
-                user32.SetWindowRgn(self.hwnd, total, True)
+                    gdi32.CombineRgn(total, total, piece, RGN_OR)
+                    gdi32.DeleteObject(piece)
+            if not total:
+                return
+            if not user32.SetWindowRgn(self.hwnd, total, True):
+                # 失败时系统不接管 region，需要自己释放；同时去掉区域限制，
+                # 宁可整块可点，也不要变成点不到。
+                gdi32.DeleteObject(total)
+                user32.SetWindowRgn(self.hwnd, None, True)
+            else:
+                self._region_ok = True
         except Exception:
-            pass
+            # 任何异常都退回"无区域"：全窗可点，比点不到好
+            try:
+                user32.SetWindowRgn(self.hwnd, None, True)
+            except Exception:
+                pass
 
     # ---- 窗口过程 ----
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
+        if msg == WM_TIMER:
+            if int(wparam) == TIMER_KEEPALIVE:
+                self.raise_to_top()
+            return 0
         if msg == WM_PAINT:
             self._paint()
             return 0
