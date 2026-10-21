@@ -103,8 +103,13 @@ class Canvas:
             b[index + c] = int(round((sc * alpha + dc * da * (1.0 - alpha)) / out_a))
         b[index + 3] = int(round(out_a * 255.0))
 
-    def plate(self, radius: int) -> None:
+    def plate(self, radius: int, color=None, alpha: float = None) -> None:
+        """圆角底板。color/alpha 可覆盖，用来和任务栏同色融合。"""
         w, h, r = self.w, self.h, max(0, radius)
+        base = PLATE if color is None else color
+        a = PLATE_ALPHA if alpha is None else alpha
+        if a <= 0:
+            return
         for y in range(h):
             for x in range(w):
                 dx = min(x, w - 1 - x)
@@ -113,7 +118,7 @@ class Canvas:
                 if dx < r and dy < r:
                     cover = _clamp01(r - math.hypot(r - dx, r - dy) + 0.5)
                 if cover > 0.0:
-                    self._blend((y * w + x) * 4, PLATE, cover * (PLATE_ALPHA / 255.0))
+                    self._blend((y * w + x) * 4, base, cover * (a / 255.0))
 
     def ring(self, cx: float, cy: float, radius: float, thickness: float,
              color, mode: str, value) -> None:
@@ -248,11 +253,17 @@ def panel_geometry(scale: float = 1.0, height_px: int = 0) -> dict:
             "cy": height / 2.0, "pad": pad, "diameter": d}
 
 
-def render_panel(readings, scale: float = 1.0, height_px: int = 0) -> tuple:
-    """渲染三设备环状面板，返回 (预乘BGRA, width, height)。"""
+def render_panel(readings, scale: float = 1.0, height_px: int = 0,
+                 plate_color=None, plate_alpha=None, text_color=None) -> tuple:
+    """渲染三设备环状面板，返回 (预乘BGRA, width, height)。
+
+    plate_color / plate_alpha / text_color 留空则用深色默认主题；
+    贴任务栏时由调用方传入采样到的任务栏颜色，让底板与任务栏融为一体。
+    """
     geo = panel_geometry(scale, height_px)
     canvas = Canvas(geo["width"], geo["height"])
-    canvas.plate(radius=max(2, int(round(geo["height"] * 0.22))))
+    canvas.plate(radius=max(2, int(round(geo["height"] * 0.22))),
+                 color=plate_color, alpha=plate_alpha)
     rows = list(readings)[:3]
     while len(rows) < 3:
         rows.append(None)
@@ -267,10 +278,12 @@ def render_panel(readings, scale: float = 1.0, height_px: int = 0) -> tuple:
                      else COLORS["coarse"] if mode == "coarse"
                      else ring_color(getattr(reading, "level", None)))
         canvas.ring(cx, cy, geo["radius"], geo["thickness"], color, mode, value)
+        label_color = color if text_color is None else text_color
         if mode == "percent":
-            canvas.text(cx, cy, str(int(round(getattr(reading, "level", 0)))), color, dot)
+            canvas.text(cx, cy, str(int(round(getattr(reading, "level", 0)))),
+                        label_color, dot)
         elif mode == "coarse":
-            canvas.text(cx, cy, str(int(value)), color, dot)
+            canvas.text(cx, cy, str(int(value)), label_color, dot)
         else:
             canvas.error_mark(cx, cy, geo["diameter"] / 60.0)
     return canvas.premultiplied_bgra(), geo["width"], geo["height"]

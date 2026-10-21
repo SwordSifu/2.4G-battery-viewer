@@ -159,6 +159,14 @@ TPM_RETURNCMD = 0x0100
 GWL_EXSTYLE = -20
 RGN_OR = 2
 TIMER_KEEPALIVE = 1
+GW_HWNDPREV = 3
+# 前台窗口切换事件：任务栏被点击/激活时触发，用它来补重传画面比轮询省得多
+EVENT_SYSTEM_FOREGROUND = 0x0003
+WINEVENT_OUTOFCONTEXT = 0x0000
+WINEVENT_SKIPOWNPROCESS = 0x0002
+WINEVENTPROC = ctypes.WINFUNCTYPE(None, ctypes.c_void_p, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.LONG, wintypes.LONG,
+                                  wintypes.DWORD, wintypes.DWORD)
 
 
 def work_area() -> tuple:
@@ -247,6 +255,11 @@ class CornerWidget:
         self._drag_origin = (0, 0)
         self._window_origin = (0, 0)
         self._menu = None
+        self._was_buried = False
+        self._surface = None
+        self._hook = None
+        self._hook_proc = None
+        self._last_submit = 0.0
 
     # ---- 创建 / 销毁 ----
     def create(self, hinst=None) -> bool:
@@ -299,14 +312,82 @@ class CornerWidget:
         usable = max(8, int(round(48 * scale)))
         return left + 6, bottom - usable - 6, usable
 
+    def _taskbar_color(self):
+        """采样任务栏底色，用来让底板与任务栏同色。
+
+        取任务栏条右侧一块空白区域的中位色，避开图标与文字。
+        采样失败时返回 None，回退到默认深色主题。
+        """
+        tb = taskbar_rect()
+        if tb is None:
+            return None
+        left, top, right, bottom = tb
+        try:
+            user32.GetDC.restype = ctypes.c_void_p
+            user32.GetDC.argtypes = [ctypes.c_void_p]
+            user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            gdi32.GetPixel.restype = wintypes.DWORD
+            gdi32.GetPixel.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+            hdc = user32.GetDC(None)
+            if not hdc:
+                return None
+            try:
+                samples = []
+                # 任务栏右半部分的空白带，纵向取中间
+                y = (top + bottom) // 2
+                span = max(1, (right - left) // 4)
+                for i in range(6):
+                    x = right - span // 2 - i * max(1, span // 8)
+                    px = gdi32.GetPixel(hdc, int(x), int(y))
+                    if px == 0xFFFFFFFF:
+                        continue
+                    samples.append(((px >> 0) & 0xFF, (px >> 8) & 0xFF, (px >> 16) & 0xFF))
+                if not samples:
+                    return None
+                samples.sort(key=lambda c: c[0] + c[1] + c[2])
+                return samples[len(samples) // 2]
+            finally:
+                user32.ReleaseDC(None, hdc)
+        except Exception:
+            return None
+
     def _paint(self) -> None:
+        """渲染并提交画面。渲染结果会缓存，重复提交走 _resubmit。"""
         if not self.hwnd:
             return
         scale = _dpi_scale(self.hwnd)
         x0, y0, band_h = self._taskbar_band()
-        data, w, h = rr.render_panel(self.readings, scale=scale, height_px=band_h)
+        # 与任务栏同色：底板用采样色，几乎是实色，环直接浮在任务栏上
+        base = self._taskbar_color()
+        plate_color = base
+        plate_alpha = 250 if base else None
+        # 任务栏偏亮时用深色数字，偏暗时用环本身的亮色
+        text_color = None
+        if base is not None:
+            luminance = 0.299 * base[0] + 0.587 * base[1] + 0.114 * base[2]
+            text_color = (26, 28, 32) if luminance > 140 else None
+        data, w, h = rr.render_panel(self.readings, scale=scale, height_px=band_h,
+                                     plate_color=plate_color, plate_alpha=plate_alpha,
+                                     text_color=text_color)
         if w <= 0 or h <= 0:
             return
+        self._surface = (data, w, h, band_h)
+        self._submit(data, w, h, x0, y0)
+
+    def _resubmit(self) -> bool:
+        """用缓存的位图重新提交一次，不重新渲染（亚毫秒级）。
+
+        弹出菜单 / 任务栏激活会让分层窗口的画面被清掉，重新渲染要 ~30ms，
+        频繁做会吃 CPU；这里只重传已渲染好的像素。
+        """
+        if not self.hwnd or not self._surface:
+            return False
+        data, w, h, band_h = self._surface
+        x0, y0, _ = self._taskbar_band()
+        self._submit(data, w, h, x0, y0)
+        return True
+
+    def _submit(self, data, w: int, h: int, x0: int, y0: int) -> None:
         hdc_screen = user32.GetDC(None)
         hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
         bmi = BITMAPINFOHEADER()
@@ -346,19 +427,24 @@ class CornerWidget:
             user32.ReleaseDC(None, hdc_screen)
 
     def _target_xy(self, w: int, h: int, default_x: int, default_y: int) -> tuple:
-        """锁定/默认时贴任务栏；解锁且有保存位置时用保存位置（必须可点）。"""
+        """锁定/默认时贴任务栏；解锁且有保存位置时用保存位置。
+
+        注意坐标系：self.position 是**物理像素**（窗口是 DPI-aware 的），
+        而 work_area() / taskbar_rect() 返回的是**虚拟化逻辑坐标**。
+        拿逻辑坐标去校验物理坐标，任何拖动位置都会被判为越界然后弹回默认位，
+        所以这里必须用 GetSystemMetrics（DPI-aware，物理像素）做边界检查。
+        """
         if self.position is not None and not self.locked:
             px, py = self.position
-            left, top, right, bottom = work_area()
-            tb = taskbar_rect()
-            # 允许松开到整个屏幕，但必须保证还有可点的区域
-            if 0 <= px <= right - 40 and 0 <= py <= bottom - 40:
+            try:
+                user32.GetSystemMetrics.restype = ctypes.c_int
+                screen_w = user32.GetSystemMetrics(0)
+                screen_h = user32.GetSystemMetrics(1)
+            except Exception:
+                screen_w, screen_h = 1920, 1080
+            # 至少保留 40x40 在屏幕内，避免拖到看不见的地方
+            if 0 <= px <= screen_w - 40 and 0 <= py <= screen_h - 40:
                 return int(px), int(py)
-            if tb is not None:
-                # 任务栏条允许
-                l, t, r, b = tb
-                if l <= px <= r - 40 and t <= py <= b - 20:
-                    return int(px), int(py)
         return int(default_x), int(default_y)
 
     def update(self, readings) -> None:
@@ -388,23 +474,111 @@ class CornerWidget:
         """重新抢回 topmost 的 Z 序。
 
         任务栏被点击/激活后会把自己的 topmost 顺序前移，把我们的浮窗压到
-        下面。定时刷新时再抬一次，保证环始终可见。
+        下面。这里每次调用都很便宜（同一 topmost 组内重排），但真正触发
+        条件的判断在 _keepalive_tick 里做。
         """
         if self.hwnd:
             user32.SetWindowPos(self.hwnd, ctypes.c_void_p(HWND_TOPMOST), 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
-    def _start_keepalive(self) -> None:
-        """用系统定时器维持 Z 序；浮窗是独立窗口，收自己的 WM_TIMER。"""
+    def _is_covered_by_taskbar(self) -> bool:
+        """浮窗当前是否被任务栏压在下面。
+
+        按 z 序从自己的前一个窗口往上走，若途中先遇到任务栏，说明被盖住了。
+        判断不出来时返回 True（保守）：宁可多抬一次，也不要让环消失。
+        """
+        if not self.hwnd:
+            return False
+        try:
+            user32.GetWindow.restype = ctypes.c_void_p
+            user32.GetWindow.argtypes = [ctypes.c_void_p, wintypes.UINT]
+            tray = user32.FindWindowW("Shell_TrayWnd", None)
+            if not tray:
+                return True
+            hwnd = self.hwnd
+            for _ in range(64):          # 有界遍历，绝不无限循环
+                hwnd = user32.GetWindow(hwnd, GW_HWNDPREV)
+                if not hwnd:
+                    return False
+                if int(hwnd) == int(tray):
+                    return True
+            return True
+        except Exception:
+            # 判断链本身出错时，按"被盖住"处理，保证可见性优先。
+            return True
+
+    def _on_foreground_change(self, hook, event, hwnd, id_object, id_child,
+                              thread_id, tick) -> None:
+        """前台窗口变了（含任务栏被点击）：补一次画面。
+
+        事件驱动，空闲时零开销。但前台事件可能很频繁，所以做 250ms 节流，
+        避免每次切换都重传整张位图导致 CPU 偏高。
+        """
+        try:
+            now = time.monotonic()
+            if now - getattr(self, "_last_submit", 0.0) < 0.25:
+                return
+            if not self.hwnd:
+                return
+            self._last_submit = now
+            self._resubmit()
+            if self._is_covered_by_taskbar():
+                self.raise_to_top()
+        except Exception:
+            pass
+
+    def _start_foreground_hook(self) -> None:
+        if self._hook or not self.hwnd:
+            return
+        try:
+            user32.SetWinEventHook.restype = ctypes.c_void_p
+            user32.SetWinEventHook.argtypes = [
+                wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, WINEVENTPROC,
+                wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
+            user32.UnhookWinEvent.argtypes = [ctypes.c_void_p]
+            if not self._hook_proc:
+                self._hook_proc = WINEVENTPROC(self._on_foreground_change)
+            self._hook = user32.SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None,
+                self._hook_proc, 0, 0, WINEVENT_OUTOFCONTEXT)
+        except Exception:
+            self._hook = None
+
+    def _stop_foreground_hook(self) -> None:
+        if self._hook:
+            try:
+                user32.UnhookWinEvent(self._hook)
+            except Exception:
+                pass
+            self._hook = None
+
+    def _keepalive_tick(self) -> None:
+        """兜底定时器：重传缓存位图（不重新渲染），必要时补置顶。
+
+        实测：右键菜单关闭 + 点击任务栏之后，分层窗口的 z 序和可见性都正常，
+        但画面会被系统清空，而且没有任何事件通知我们。只能靠周期性重传来恢复。
+        重传走缓存的像素（约 1ms），渲染仍只在数据变化时做。
+        """
         if not self.hwnd:
             return
+        self._resubmit()
+        if self._is_covered_by_taskbar():
+            self.raise_to_top()
+
+    def _start_keepalive(self) -> None:
+        """前台事件钩子 + 低频兜底定时器。"""
+        if not self.hwnd:
+            return
+        self._start_foreground_hook()
         user32.SetTimer.restype = ctypes.c_size_t
         user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                     wintypes.UINT, ctypes.c_void_p]
         user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-        user32.SetTimer(self.hwnd, TIMER_KEEPALIVE, 2000, None)
+        # 500ms：画面被系统清空后最多半秒内恢复；重传用缓存，开销很小
+        user32.SetTimer(self.hwnd, TIMER_KEEPALIVE, 500, None)
 
     def _stop_keepalive(self) -> None:
+        self._stop_foreground_hook()
         if self.hwnd:
             user32.KillTimer(self.hwnd, TIMER_KEEPALIVE)
 
@@ -448,6 +622,11 @@ class CornerWidget:
                                     pt.x, pt.y, 0, self.hwnd, None)
         user32.DestroyMenu(menu)
         self._menu = None
+        # 菜单关闭的瞬间任务栏会变成前台窗口并把自己抬到 topmost 组最前，
+        # 我们随即被压到下面。这里立即重绘并重新置顶，否则要等到下一次
+        # 数据刷新（默认 60 秒）才会恢复，表现出来就是"环消失了"。
+        self.raise_to_top()
+        self._paint()
         if cmd == ids["refresh"]:
             self.on_refresh()
         elif cmd == ids["panel"]:
@@ -519,7 +698,7 @@ class CornerWidget:
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_TIMER:
             if int(wparam) == TIMER_KEEPALIVE:
-                self.raise_to_top()
+                self._keepalive_tick()
             return 0
         if msg == WM_PAINT:
             self._paint()
