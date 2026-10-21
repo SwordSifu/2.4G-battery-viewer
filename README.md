@@ -76,7 +76,21 @@ python tray_app.py --quit
 | 空闲 75 秒 CPU | 0.031 秒（要求 < 0.5 秒） |
 | 离线单元测试 | 27 项通过（不触硬件） |
 
+## 许可证
+
+本仓库分两部分，授权范围不同，请勿混为一谈：
+
+- **SwordSifu 原创部分**（`personal_hid.py`、`personal_devices.py`、测试、
+  以及对面板/托盘/图标的改写）采用 [MIT](LICENSE)。
+- **来自上游的部分**（`app.py`、`battery.py`、`bt_battery.py`、`darkrim_proto.py`、
+  `hid_win.py`、`win_link.py`、`win_shell.py`、`PROMPT.md` 等）来自
+  [yszyszysz233/2.4G-battery-viewer](https://github.com/yszyszysz233/2.4G-battery-viewer)，
+  上游**没有附带开源许可证**，README 注明“仅供学习与个人使用”。
+  因此这部分不随本仓库的 MIT 授权，整体再分发或商用请另行取得上游授权。
+
+详细划分见 [LICENSE](LICENSE) 末尾的“适用范围 / Scope”一节。
+
 ## 说明
 
 私有协议来自对本机已安装厂商软件的静态分析加真机只读验证，
-仅供个人学习与自用。仓库没有开源许可证，公开分发前请先确认授权。
+仅供个人学习与自用。
