@@ -146,6 +146,7 @@ class TrayApp:
         self.taskbar_created_msg = USER32.RegisterWindowMessageW("TaskbarCreated")
         self.msg_quit = USER32.RegisterWindowMessageW(tc.MSG_QUIT)
         self.msg_reload = USER32.RegisterWindowMessageW(tc.MSG_RELOAD)
+        self.msg_show = USER32.RegisterWindowMessageW(tc.MSG_SHOW)
         self.log("启动 " + json.dumps(self.cfg, ensure_ascii=False))
 
     def log(self, message: str) -> None:
@@ -286,12 +287,37 @@ class TrayApp:
         rows = [self.readings[key] for key in pd.DEVICE_KEYS]
         self.corner.update(rows)
 
+    def show_corner(self) -> bool:
+        """Explicit launch/show restores user visibility, still respecting fullscreen."""
+        if self.closing or not self.hwnd:
+            return False
+        if self.corner is None:
+            if not self.create_corner():
+                return False
+        else:
+            if not self.corner.hwnd:
+                self.log("电量环窗口已销毁，请退出后台后重新启动")
+                return False
+            try:
+                self.corner.show()
+            except Exception:
+                self.log("恢复电量环失败:\n" + traceback.format_exc())
+                return False
+        if not self.cfg.get("corner", True):
+            # Legacy versions persisted session hide as a permanent disable.
+            # Only an explicit launch/show repairs it; refresh/reload never do.
+            fresh = tc.load_config()
+            fresh["corner"] = True
+            self.cfg["corner"] = True
+            if not tc.save_config(fresh):
+                self.log("电量环已恢复，但保存显示标记失败")
+        return True
+
     def hide_corner(self) -> None:
+        """Hide this session only; never make future launches invisible."""
         if self.corner:
             self.corner.hide()
-        self.cfg["corner"] = False
-        tc.save_config(self.cfg)
-        self.log("浮窗已隐藏")
+        self.log("电量环已隐藏（本次运行；再次启动或点显示可恢复）")
 
     def toggle_corner_lock(self, keep: bool = False) -> None:
         if not self.corner:
@@ -371,6 +397,9 @@ class TrayApp:
         if msg in (self.msg_quit, WM_CLOSE):
             self.quit()
             return 0
+        if msg == self.msg_show:
+            self.show_corner()
+            return 0
         if msg == self.msg_reload:
             self.apply_config()
             return 0
@@ -405,7 +434,7 @@ class TrayApp:
             return 1
         self.hwnd = hwnd
         self.apply_config()
-        if self.cfg.get("corner", True) and not self.create_corner():
+        if not self.show_corner():
             self.quit()
             return 1
         self.apply_timer()
@@ -423,6 +452,7 @@ def main() -> int:
     parser.add_argument("--debug", action="store_true", help="前台运行并打印过程")
     parser.add_argument("--status", action="store_true", help="打印当前状态")
     parser.add_argument("--quit", action="store_true", help="让运行中的电量环后台退出")
+    parser.add_argument("--show", action="store_true", help="显示电量环；未运行时启动后台（默认启动也会恢复显示）")
     args = parser.parse_args()
 
     if args.status:
@@ -439,9 +469,9 @@ def main() -> int:
     if not first:
         tc.close_instance(handle)
         if tc.is_tray_running():
-            tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（右键左下角电量环可打开面板）")
-            return 0
+            ok = tc.post_to_tray(tc.MSG_SHOW)
+            print("已请求显示电量环（前台全屏时仍临时隐藏）" if ok else "请求显示失败，请重试")
+            return 0 if ok else 1
         # The mutex is orphaned (previous process died). Never kill unknown
         # processes; report honestly and let the user retry.
         print("检测到电量环后台单实例锁被占用，但没有后台窗口。请稍后重试。")

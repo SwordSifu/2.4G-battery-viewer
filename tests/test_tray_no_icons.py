@@ -50,6 +50,7 @@ class NoNotificationIconsTests(unittest.TestCase):
         self.common.MUTEX_NAME = "fake-no-icons-mutex"
         self.common.WND_CLASS = "fake-no-icons-window"
         self.common.MSG_QUIT, self.common.MSG_RELOAD = "fake-quit", "fake-reload"
+        self.common.MSG_SHOW = "fake-show"
         self.common.USER32, self.common.KERNEL32 = self.api, self.kernel
         self.common.load_config = MagicMock(side_effect=lambda: copy.deepcopy(self.config))
         self.common.save_config = MagicMock(return_value=True)
@@ -74,6 +75,7 @@ class NoNotificationIconsTests(unittest.TestCase):
         self.corner = MagicMock()
         self.corner.create.return_value = True
         self.corner.width, self.corner.height = 220, 44
+        self.corner.hwnd = 456
         self.corner.position = None
         self.corner_module = types.ModuleType("corner_widget")
         self.corner_module.CornerWidget = MagicMock(return_value=self.corner)
@@ -113,16 +115,97 @@ class NoNotificationIconsTests(unittest.TestCase):
         self.common.save_config.assert_not_called()
         self.assert_no_registration()
 
-    def test_explicit_hidden_corner_setting_is_respected_without_config_writes(self):
-        self.config["corner"] = False
+    def test_explicit_launch_recovers_legacy_persistent_hide(self):
+        self.config.update(corner=False, interval=300, corner_pos=[233, 1697])
         self.app.cfg = copy.deepcopy(self.config)
         result, refresh = self.run_without_reader()
         self.assertEqual(result, 0)
-        self.corner.create.assert_not_called()
-        self.assertIsNone(self.app.corner)
+        self.corner.create.assert_called_once()
+        self.assertIs(self.app.corner, self.corner)
         refresh.assert_called_once_with()
+        saved = self.common.save_config.call_args.args[0]
+        self.assertEqual(saved, dict(self.config, corner=True))
+        self.assertTrue(self.app.cfg["corner"])
+        self.assert_no_registration()
+
+    def test_hide_is_session_only_and_neither_reload_nor_refresh_restores(self):
+        self.app.hwnd, self.app.corner = 101, self.corner
+        self.app.hide_corner()
+        self.corner.hide.assert_called_once()
+        self.assertTrue(self.app.cfg["corner"])
+        with patch.object(self.app, "refresh_now"):
+            self.app.wnd_proc(101, self.subject.WM_TIMER, 1, 0)
+            self.app.wnd_proc(101, self.app.msg_reload, 0, 0)
+        self.app.on_refresh_done()
+        self.corner.show.assert_not_called()
         self.common.save_config.assert_not_called()
         self.assert_no_registration()
+
+    def test_explicit_show_message_reuses_hidden_window_without_new_reader(self):
+        self.app.hwnd, self.app.corner = 101, self.corner
+        self.app.hide_corner()
+        self.app.wnd_proc(101, self.app.msg_show, 0, 0)
+        self.corner.show.assert_called_once()
+        self.corner_module.CornerWidget.assert_not_called()
+        self.devices.read_all.assert_not_called()
+        self.common.save_config.assert_not_called()
+        self.assert_no_registration()
+
+    def test_explicit_show_of_legacy_host_creates_missing_ring(self):
+        self.app.hwnd, self.app.cfg["corner"] = 101, False
+        self.config["corner"] = False
+        self.assertTrue(self.app.show_corner())
+        self.corner.create.assert_called_once()
+        self.assertTrue(self.common.save_config.call_args.args[0]["corner"])
+        self.assert_no_registration()
+
+    def test_show_preserves_fresh_config_other_fields(self):
+        self.app.hwnd, self.app.corner = 101, self.corner
+        self.app.cfg["corner"] = False
+        self.config.update(interval=300, autostart=True, corner_pos=[101, 202])
+        self.assertTrue(self.app.show_corner())
+        self.assertEqual(self.common.save_config.call_args.args[0], self.config)
+        self.assertEqual(self.app.cfg["interval"], 60)
+
+    def test_save_failure_does_not_prevent_explicit_recovery(self):
+        self.app.hwnd, self.app.cfg["corner"] = 101, False
+        self.common.save_config.return_value = False
+        self.assertTrue(self.app.show_corner())
+        self.assertIs(self.app.corner, self.corner)
+        self.assertTrue(self.app.cfg["corner"])
+        self.assert_no_registration()
+
+    def test_show_message_after_quit_cannot_resurrect_window(self):
+        self.app.hwnd, self.app.corner = 101, self.corner
+        self.app.quit()
+        self.corner.reset_mock()
+        self.app.wnd_proc(101, self.app.msg_show, 0, 0)
+        self.corner.show.assert_not_called()
+        self.corner_module.CornerWidget.assert_not_called()
+
+    def test_repeated_launch_requests_show_instead_of_passive_reload(self):
+        self.common.acquire_instance.return_value = (222, False)
+        self.common.is_tray_running.return_value = True
+        for arguments in ([], ["--show"]):
+            self.common.post_to_tray.reset_mock()
+            with patch.object(sys, "argv", ["tray_app.py"]+arguments), patch("builtins.print"):
+                self.assertEqual(self.subject.main(), 0)
+            self.common.post_to_tray.assert_called_once_with(self.common.MSG_SHOW)
+        self.corner_module.CornerWidget.assert_not_called()
+        self.assert_no_registration()
+
+    def test_repeated_launch_reports_show_delivery_failure(self):
+        self.common.acquire_instance.return_value = (222, False)
+        self.common.is_tray_running.return_value = True
+        self.common.post_to_tray.return_value = False
+        with patch.object(sys, "argv", ["tray_app.py", "--show"]), patch("builtins.print"):
+            self.assertEqual(self.subject.main(), 1)
+
+    def test_show_does_not_pretend_a_destroyed_ring_was_restored(self):
+        self.app.hwnd, self.app.corner = 101, self.corner
+        self.corner.hwnd = None
+        self.assertFalse(self.app.show_corner())
+        self.corner.show.assert_not_called()
 
     def test_explicit_add_update_toggle_are_hard_disabled_with_any_legacy_state(self):
         for was_added in (False, True):

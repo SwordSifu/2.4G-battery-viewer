@@ -198,6 +198,8 @@ def build_ui():
 
     btn_tray = ttk.Button(row_b, text="启动左下角电量环")
     btn_tray.pack(side="right")
+    btn_show = ttk.Button(row_b, text="显示电量环", state="disabled", command=lambda: _on_show())
+    btn_show.pack(side="right", padx=(0, 8))
     btn_link = ttk.Button(row_b, text="重建桌面链接", command=lambda: _on_links())
     btn_link.pack(side="right", padx=(0, 8))
     lab_tray = ttk.Label(row_b, text="", style="CardSub.TLabel")
@@ -212,16 +214,23 @@ def build_ui():
     def _refresh_tray_state() -> None:
         if state.get("starting"):
             return
+        running = tc.is_tray_running()
+        btn_show.configure(state="normal" if running else "disabled")
         if state["notice"] and time.time() < state["notice_until"]:
             lab_tray.configure(text=state["notice"])
             btn_tray.configure(state="normal",
-                               text="退出电量环后台" if tc.is_tray_running() else "启动左下角电量环")
+                               text="退出电量环后台" if running else "启动左下角电量环")
             return
-        running = tc.is_tray_running()
         btn_tray.configure(state="normal",
                            text="退出电量环后台" if running else "启动左下角电量环")
-        lab_tray.configure(text="左下角电量环运行中：右键电量环可打开本窗口"
+        lab_tray.configure(text="后台运行中；隐藏后可点「显示电量环」"
                                 if running else "电量环后台未运行：不会后台自动刷新")
+
+    def _on_show() -> None:
+        if tc.post_to_tray(tc.MSG_SHOW):
+            notify("已请求显示电量环（全屏时仍临时隐藏）")
+        else:
+            notify("后台未运行，请先启动左下角电量环", 10)
 
     def _reschedule() -> None:
         if state["after_id"]:
@@ -307,6 +316,7 @@ def build_ui():
         state["starting"] = True
         state["started_at"] = time.time()
         btn_tray.configure(state="disabled", text="正在启动…")
+        btn_show.configure(state="disabled")
         lab_tray.configure(text="正在启动左下角电量环…")
 
         def work() -> None:

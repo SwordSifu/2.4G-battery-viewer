@@ -21,6 +21,7 @@ python my_devices.py --once      # 命令行读一次
 python my_devices.py --autostart status
 python tray_app.py               # 仅左下角三个电量环，无右侧通知区图标（pythonw 静默运行）
 python tray_app.py --status
+python tray_app.py --show        # 恢复已隐藏的环；未运行时启动。再次普通启动也会恢复
 python tray_app.py --quit
 ```
 
@@ -44,7 +45,13 @@ python tray_app.py --quit
 - **右键** → 管理菜单：立即刷新 / 打开详细面板 / 解锁位置 / 刷新间隔 /
   隐藏浮窗 / 退出；不再提供通知区图标开关
 - **双击** → 打开详细面板
-- **解锁位置**后可拖动，位置会记住；隐藏后可通过 `corner` 配置重新启用
+- **解锁位置**后可拖动，位置会记住。
+- **隐藏电量环（本次运行）**只隐藏当前会话，不再永久保存为禁用。
+  主动再次启动后台、运行 `--show`，或在面板点“显示电量环”即可恢复；
+  已运行时复用原进程和窗口，不另开后台。普通刷新/配置重载/退出全屏不会唤回手动隐藏。
+- **退出电量环后台**会停止进程；下次启动正常创建电量环。旧版遗留的 `corner: false`
+  会在主动启动/显示时修复为 `true`，不需要手改配置；不改变刷新间隔、自启和保存位置。
+  恢复显示仍遵守全屏临时隐藏，前台有全屏窗口时会等退出全屏再显示。
 
 实现上有几个必须知道的细节：
 
@@ -123,7 +130,9 @@ python tray_app.py --quit
 | 重复取消/外部点击取消 | Escape 重复 4 次及点击菜单外取消通过；菜单前后 GDI/USER 无增长 |
 | 隐藏/退出/原生销毁 | 鼠标选择隐藏、退出；菜单中 WM_CLOSE/外部 DestroyWindow 均通过，后续更新不复活 |
 | 全屏与普通最大化 | 原生合成窗口及已部署后台实例均验证隐藏/恢复；连续 3 轮通过，包含同窗口改尺寸、切换前台、隐藏期间刷新及手动隐藏 |
-| 离线单元测试 | 94 项通过（不触硬件/桌面），含菜单生命周期、GDI、全屏几何/状态及禁止通知区注册 |
+| 隐藏与重启恢复 | 隔离配置/模拟读数的真实跨进程验证通过：遗留隐藏标记、同进程再次打开、面板启动助手、隐藏后退出/新进程重启；实际用户实例已恢复显示 |
+| 面板恢复按钮 | 真实 Tk 窗口验证“显示电量环”在最小窗口宽度可见、发送 SHOW、后台不存在时禁用；设备/系统动作全部替换为测试实现 |
+| 离线单元测试 | 109 项通过（不触硬件/桌面），含菜单生命周期、GDI、全屏、通知区禁用及显式启动/显示恢复 |
 
 ### 回归验证
 
@@ -134,6 +143,7 @@ python tests/windows_corner_smoke.py --run --idle-seconds 75
 python tests/windows_corner_smoke.py --run --idle-seconds 0 --repeat-menus 0 --termination close
 python tests/windows_corner_smoke.py --run --idle-seconds 0 --repeat-menus 0 --termination external
 python tests/windows_fullscreen_smoke.py --run
+python tests/windows_restart_smoke.py --run  # 临时配置、独立命名空间、模拟读数；不接触个人配置
 # 也可只读观察一个已运行且用户允许显示的后台实例（将 1234 换成实际 PID）：
 python tests/windows_fullscreen_smoke.py --run --observe-pid 1234
 ```

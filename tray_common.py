@@ -26,6 +26,7 @@ UI_MUTEX_NAME = "Local\\PersonalThreeDeviceBattery.Panel.v1"
 UI_TITLE = "我的三设备电量 · Personal"
 MSG_QUIT = "PersonalThreeDeviceBattery.Quit.v1"
 MSG_RELOAD = "PersonalThreeDeviceBattery.Reload.v1"
+MSG_SHOW = "PersonalThreeDeviceBattery.Show.v1"
 DEFAULT_CONFIG = {"interval": 60, "autostart": False,
                   "corner": True, "corner_pos": None}
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),
@@ -299,8 +300,9 @@ def start_ui() -> bool:
 
 
 def start_tray_app(wait_timeout: float = 6.0) -> bool:
+    """Explicit start/show request, not a passive running-state check."""
     if is_tray_running():
-        return True
+        return post_to_tray(MSG_SHOW)
     try:
         subprocess.Popen([pythonw_path(), tray_script()], cwd=BASE_DIR,
                          creationflags=0x08000000)
@@ -310,6 +312,6 @@ def start_tray_app(wait_timeout: float = 6.0) -> bool:
     # Bounded startup check, not an idle polling loop. Never terminate a process.
     while time.monotonic() < deadline:
         if is_tray_running():
-            return True
+            return post_to_tray(MSG_SHOW)
         time.sleep(0.1)
-    return is_tray_running()
+    return bool(is_tray_running() and post_to_tray(MSG_SHOW))

@@ -727,9 +727,9 @@ class CornerWidget:
                 flags = MF_STRING | (MF_CHECKED if current == intervals[cmd_id] else 0)
                 user32.AppendMenuW(menu, flags, cmd_id, "刷新间隔：" + label)
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            user32.AppendMenuW(menu, MF_STRING, 3, "隐藏此浮窗")
+            user32.AppendMenuW(menu, MF_STRING, 3, "隐藏电量环（本次运行）")
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            user32.AppendMenuW(menu, MF_STRING, 90, "退出电量托盘")
+            user32.AppendMenuW(menu, MF_STRING, 90, "退出电量环后台")
             pt = POINT()
             user32.GetCursorPos(ctypes.byref(pt))
             flags = TPM_RIGHTBUTTON | TPM_RETURNCMD
