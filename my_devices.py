@@ -8,6 +8,7 @@
 
 只有两台设备能给出真实百分比；手柄只显示系统提供的电池档位，
 不把 Windows 合成的 700/1000 冒充 70%。
+后台入口只有左下角三个电量环，不显示右下角通知区图标。
 """
 from __future__ import annotations
 
@@ -195,7 +196,7 @@ def build_ui():
     ttk.Checkbutton(row_a, text="开机自启（任务管理器可见）", variable=v_boot,
                     command=lambda: _on_boot()).pack(side="left", padx=(18, 0))
 
-    btn_tray = ttk.Button(row_b, text="启动托盘程序")
+    btn_tray = ttk.Button(row_b, text="启动左下角电量环")
     btn_tray.pack(side="right")
     btn_link = ttk.Button(row_b, text="重建桌面链接", command=lambda: _on_links())
     btn_link.pack(side="right", padx=(0, 8))
@@ -214,13 +215,13 @@ def build_ui():
         if state["notice"] and time.time() < state["notice_until"]:
             lab_tray.configure(text=state["notice"])
             btn_tray.configure(state="normal",
-                               text="退出托盘程序" if tc.is_tray_running() else "启动托盘程序")
+                               text="退出电量环后台" if tc.is_tray_running() else "启动左下角电量环")
             return
         running = tc.is_tray_running()
         btn_tray.configure(state="normal",
-                           text="退出托盘程序" if running else "启动托盘程序")
-        lab_tray.configure(text="托盘运行中：右键托盘图标可打开本窗口"
-                                if running else "托盘未运行：不会后台自动刷新")
+                           text="退出电量环后台" if running else "启动左下角电量环")
+        lab_tray.configure(text="左下角电量环运行中：右键电量环可打开本窗口"
+                                if running else "电量环后台未运行：不会后台自动刷新")
 
     def _reschedule() -> None:
         if state["after_id"]:
@@ -306,7 +307,7 @@ def build_ui():
         state["starting"] = True
         state["started_at"] = time.time()
         btn_tray.configure(state="disabled", text="正在启动…")
-        lab_tray.configure(text="正在启动托盘程序…")
+        lab_tray.configure(text="正在启动左下角电量环…")
 
         def work() -> None:
             try:
@@ -323,7 +324,7 @@ def build_ui():
         state["starting"] = False
         _refresh_tray_state()
         if not ok:
-            notify("启动失败：可双击桌面「电量托盘」再试", 12)
+            notify("电量环启动失败：可双击桌面「电量托盘」（原启动链接）再试", 12)
 
     def _apply(readings: list[pd.Reading]) -> None:
         for reading in readings:

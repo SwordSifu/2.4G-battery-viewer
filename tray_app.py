@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""tray_app.py —— 三设备电量托盘（纯 ctypes，无第三方依赖）
+"""tray_app.py —— 左下角三设备电量环（纯 ctypes，无第三方依赖）
 
-* 通知区域三个图标：鼠标 / 键盘 / 手柄。图标内容就是电量数字；
-  手柄只有四档区间，图标显示 "--"，tooltip 写清档位。
-* 右键任意图标 → 打开/前置唯一的面板窗口；左键 → 立刻刷新一次。
-* 悬停 tooltip：设备名 + 数值 + 来源 + 更新时间。
+* 仅保留左下角鼠标 / 键盘 / 手柄三个电量环，不注册右下角通知区图标。
+* 手柄只有系统电池档位，不伪造精确百分比。
+* 右键电量环打开菜单，可打开/前置面板或立即刷新。
 * 低 CPU：SetTimer 驱动，空闲不轮询；读取在后台线程。
 * 不写任何日志文件；只有 --debug 时才往控制台打印。
 
@@ -188,29 +187,18 @@ class TrayApp:
         return nid
 
     def _apply_icon(self, action: int, uid: int, key: str, plate: bool) -> bool:
-        reading = self.readings[key]
-        level = reading.level if reading.ok else None
-        # Never render a coarse category as a number on the icon.
-        text = str(level) if level is not None else "--"
-        nid = self._nid(uid)
-        nid.hIcon = win_icon.make_hicon(text, self._color(level), plate)
-        nid.szTip = self._tip(key)[:127]
-        return bool(SHELL32.Shell_NotifyIconW(action, ctypes.byref(nid)))
+        """Notification-area registration is disabled, including legacy callers."""
+        return False
 
     def add_icons(self) -> None:
-        for uid, key, plate in TRAY_ICONS:
-            ok = self._apply_icon(NIM_ADD, uid, key, plate)
-            self.log(f"NIM_ADD {key} -> {ok}")
-        self.icons_added = True
+        """Compatibility no-op: the left corner rings are the only entry."""
 
     def update_icons(self) -> None:
-        if not self.icons_added:
-            self.add_icons()
-            return
-        for uid, key, plate in TRAY_ICONS:
-            self._apply_icon(NIM_MODIFY, uid, key, plate)
+        """Compatibility no-op; refresh must never register notification icons."""
 
     def remove_icons(self) -> None:
+        if not self.icons_added:
+            return
         for uid, _, _ in TRAY_ICONS:
             nid = self._nid(uid)
             nid.uFlags = 0
@@ -255,32 +243,42 @@ class TrayApp:
         self.busy = False
         self.log("刷新完成: " + ", ".join(
             f"{k}={self.readings[k].display_value}" for k in pd.DEVICE_KEYS))
-        self.update_icons()
         self.update_corner()
 
     # ---- 左下角环状浮窗 ----
-    def create_corner(self) -> None:
-        """浮窗跑在本进程内：不另开进程，也不重复查询 HID。"""
-        import corner_widget
-        self.corner = corner_widget.CornerWidget(
-            on_refresh=self.refresh_now,
-            on_open_panel=self.open_ui,
-            on_toggle_tray=self.toggle_icons,
-            on_hide=self.hide_corner,
-            on_quit=self.quit,
-            on_toggle_lock=self.toggle_corner_lock,
-            interval_getter=lambda: self.cfg["interval"],
-            on_interval_change=self.set_interval_from_menu,
-            locked=self.corner_locked,
-            position=self.cfg.get("corner_pos"),
-        )
-        if not self.corner.create():
-            self.log("浮窗创建失败（继续只用托盘图标）")
+    def create_corner(self) -> bool:
+        """浮窗跑在本进程内；创建失败就退出，不回退到通知区图标。"""
+        corner = None
+        try:
+            import corner_widget
+            corner = corner_widget.CornerWidget(
+                on_refresh=self.refresh_now,
+                on_open_panel=self.open_ui,
+                on_toggle_tray=self.toggle_icons,
+                on_hide=self.hide_corner,
+                on_quit=self.quit,
+                on_toggle_lock=self.toggle_corner_lock,
+                interval_getter=lambda: self.cfg["interval"],
+                on_interval_change=self.set_interval_from_menu,
+                locked=self.corner_locked,
+                position=self.cfg.get("corner_pos"),
+            )
+            if not corner.create():
+                raise RuntimeError("无法创建左下角电量环")
+            self.corner = corner
+            self.update_corner()
+            self.log(f"左下角电量环已创建 size={corner.width}x{corner.height} "
+                     f"scale={getattr(corner, 'last_scale', '?')}")
+            return True
+        except Exception:
             self.corner = None
-            return
-        self.update_corner()
-        self.log(f"左下角浮窗已创建 size={self.corner.width}x{self.corner.height} "
-                 f"scale={getattr(self.corner, 'last_scale', '?')}")
+            if corner is not None:
+                try:
+                    corner.destroy()
+                except Exception:
+                    self.log("清理创建失败的电量环出错:\n" + traceback.format_exc())
+            self.log("电量环创建失败，不启用通知区图标:\n" + traceback.format_exc())
+            return False
 
     def update_corner(self) -> None:
         if not self.corner:
@@ -317,10 +315,7 @@ class TrayApp:
         self.log(f"刷新间隔 -> {seconds} 秒")
 
     def toggle_icons(self) -> None:
-        if self.icons_added:
-            self.remove_icons()
-        else:
-            self.add_icons()
+        """Legacy menu callback retained as a no-op; notification icons stay off."""
 
     # ---- UI ----
     def open_ui(self) -> None:
@@ -380,8 +375,8 @@ class TrayApp:
             self.apply_config()
             return 0
         if msg == self.taskbar_created_msg:
+            # Explorer rebuilding must never create notification-area icons.
             self.icons_added = False
-            self.add_icons()
             return 0
         if msg == WM_DESTROY:
             # Without this, a destroyed window leaves a live process holding
@@ -409,11 +404,11 @@ class TrayApp:
             self.log(f"CreateWindowExW 失败 err={ctypes.get_last_error()}")
             return 1
         self.hwnd = hwnd
-        self.add_icons()
         self.apply_config()
+        if self.cfg.get("corner", True) and not self.create_corner():
+            self.quit()
+            return 1
         self.apply_timer()
-        if self.cfg.get("corner", True):
-            self.create_corner()
         self.refresh_now()
         message = MSG()
         while USER32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
@@ -424,20 +419,20 @@ class TrayApp:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="三设备电量托盘")
+    parser = argparse.ArgumentParser(description="左下角三设备电量环")
     parser.add_argument("--debug", action="store_true", help="前台运行并打印过程")
     parser.add_argument("--status", action="store_true", help="打印当前状态")
-    parser.add_argument("--quit", action="store_true", help="让运行中的托盘退出")
+    parser.add_argument("--quit", action="store_true", help="让运行中的电量环后台退出")
     args = parser.parse_args()
 
     if args.status:
         print("配置：", json.dumps(tc.load_config(), ensure_ascii=False))
         print("开机自启：", tc.is_autostart_enabled())
-        print("托盘运行中：", tc.is_tray_running())
+        print("左下角电量环后台运行中：", tc.is_tray_running())
         return 0
     if args.quit:
         ok = tc.post_to_tray(tc.MSG_QUIT)
-        print("已通知托盘退出" if ok else "托盘没在运行")
+        print("已通知电量环后台退出" if ok else "电量环后台未运行")
         return 0 if ok else 1
 
     handle, first = tc.acquire_instance(MUTEX_NAME)
@@ -445,11 +440,11 @@ def main() -> int:
         tc.close_instance(handle)
         if tc.is_tray_running():
             tc.post_to_tray(tc.MSG_RELOAD)
-            print("已经在运行了（右键托盘图标可打开面板）")
+            print("已经在运行了（右键左下角电量环可打开面板）")
             return 0
         # The mutex is orphaned (previous process died). Never kill unknown
         # processes; report honestly and let the user retry.
-        print("检测到托盘单实例锁被占用，但没有托盘窗口。请稍后重试。")
+        print("检测到电量环后台单实例锁被占用，但没有后台窗口。请稍后重试。")
         return 1
 
     try:
@@ -464,8 +459,10 @@ def main() -> int:
         traceback.print_exc()
         return 1
     finally:
-        app.stop_event.set()
-        tc.close_instance(handle)
+        try:
+            app.quit()
+        finally:
+            tc.close_instance(handle)
 
 
 if __name__ == "__main__":

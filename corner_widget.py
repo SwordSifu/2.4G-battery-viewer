@@ -8,8 +8,8 @@
 * 面板不抢焦点（WS_EX_NOACTIVATE），鼠标穿透只在需要时才关闭。
 * 交互（全部是显式操作）：
     - 左键单击任意环  → 立刻刷新一次
-    - 右键            → 弹出管理菜单（刷新 / 显示托盘图标 / 隐藏浮窗 /
-                        打开详细面板 / 固定或自由拖动 / 刷新间隔 / 退出）
+    - 右键            → 弹出管理菜单（刷新 / 隐藏浮窗 / 打开详细面板 /
+                        固定或自由拖动 / 刷新间隔 / 退出）
     - 拖动            → 仅当菜单里选过"解锁位置"才可移动，位置会记住
 * 双击 → 打开详细面板。
 
@@ -22,6 +22,7 @@ import time
 from ctypes import wintypes
 
 import ring_render as rr
+from fullscreen_guard import foreground_fullscreen
 
 WM_DESTROY = 0x0002
 WM_PAINT = 0x000F
@@ -259,7 +260,8 @@ class CornerWidget:
 
     def __init__(self, on_refresh, on_open_panel, on_toggle_tray,
                  on_hide, on_quit, on_toggle_lock, interval_getter,
-                 on_interval_change, locked: bool = True, position=None):
+                 on_interval_change, locked: bool = True, position=None,
+                 fullscreen_probe=None):
         self.on_refresh = on_refresh
         self.on_open_panel = on_open_panel
         self.on_toggle_tray = on_toggle_tray
@@ -290,10 +292,34 @@ class CornerWidget:
         self._menu_active = False
         self._paint_pending = False
         self._restore_remaining = 0
+        # User intent and temporary fullscreen suppression are independent.
+        self._fullscreen_suppressed = False
+        self._fullscreen_probe = fullscreen_probe or foreground_fullscreen
 
     def _can_present(self) -> bool:
         return bool(self.hwnd and self._visible and not self._destroyed
-                    and not self._menu_active)
+                    and not self._menu_active and not self._fullscreen_suppressed)
+
+    def _sync_fullscreen(self) -> bool:
+        """Reconcile temporary visibility without changing user configuration."""
+        if not self.hwnd or not self._visible or self._destroyed:
+            return False
+        blocked = self._fullscreen_probe(self.hwnd)
+        if blocked is None:  # Failed inspection must not unhide over a game.
+            return False
+        blocked = bool(blocked)
+        if blocked == self._fullscreen_suppressed:
+            return False
+        self._fullscreen_suppressed = blocked
+        self._paint_pending = True
+        if blocked:
+            self._shown = False
+            self._restore_remaining = 0
+            user32.KillTimer(self.hwnd, TIMER_RESTORE)
+            if self._menu_active:
+                user32.EndMenu()
+            user32.ShowWindow(self.hwnd, SW_HIDE)
+        return True
 
     # ---- 创建 / 销毁 ----
     def create(self, hinst=None) -> bool:
@@ -396,6 +422,7 @@ class CornerWidget:
 
     def _paint(self) -> None:
         """渲染并提交画面。渲染结果会缓存，重复提交走 _resubmit。"""
+        self._sync_fullscreen()
         if not self._can_present():
             self._paint_pending = True
             return
@@ -418,7 +445,7 @@ class CornerWidget:
             return
         self._surface = (data, w, h, band_h)
         self._submit(data, w, h, x0, y0)
-        if not self._shown:
+        if self._can_present() and not self._shown:
             user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
             self._shown = True
             self.raise_to_top()
@@ -429,6 +456,7 @@ class CornerWidget:
         菜单关闭 / 任务栏激活后的有界恢复复用缓存，避免重复采样底色和渲染。
         此方法本身不显示窗口，也不改变 Z 序。
         """
+        self._sync_fullscreen()
         if not self._can_present() or not self._surface:
             return False
         data, w, h, band_h = self._surface
@@ -437,6 +465,7 @@ class CornerWidget:
         return True
 
     def _submit(self, data, w: int, h: int, x0: int, y0: int) -> None:
+        self._sync_fullscreen()
         if not self._can_present():
             return
         hdc_screen = user32.GetDC(None)
@@ -503,13 +532,15 @@ class CornerWidget:
     def update(self, readings) -> None:
         self.readings = list(readings)
         self._paint_pending = True
+        self._sync_fullscreen()
         if self._can_present():
             self._paint()
-            self._start_keepalive()
+        self._start_keepalive()  # Must keep detecting exit from fullscreen.
 
     def show(self) -> None:
         if self.hwnd and not self._destroyed:
             self._visible = True
+            self._sync_fullscreen()
             self._paint()
             self._start_keepalive()
 
@@ -523,6 +554,7 @@ class CornerWidget:
             user32.ShowWindow(self.hwnd, SW_HIDE)
 
     def refresh_position(self) -> None:
+        self._sync_fullscreen()
         if self._can_present() and self.width:
             x0, y0, _band = self._taskbar_band()
             x, y = self._target_xy(self.width, self.height, x0, y0)
@@ -536,6 +568,7 @@ class CornerWidget:
         下面。这里每次调用都很便宜（同一 topmost 组内重排），但真正触发
         条件的判断在 _keepalive_tick 里做。
         """
+        self._sync_fullscreen()
         if self._can_present():
             user32.SetWindowPos(self.hwnd, ctypes.c_void_p(HWND_TOPMOST), 0, 0, 0, 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
@@ -570,13 +603,10 @@ class CornerWidget:
                               thread_id, tick) -> None:
         """前台窗口变了（含任务栏被点击）：补一次画面。
 
-        事件驱动，空闲时零开销。但前台事件可能很频繁，所以做 250ms 节流，
-        避免每次切换都重传整张位图导致 CPU 偏高。
+        只投递消息，在创建线程检查全屏后再决定是否恢复。
+        全屏临时隐藏期间仍需接收前台切换，不能用 _can_present 阻断恢复。
         """
-        if not self._can_present():
-            return
-        now = time.monotonic()
-        if now - self._last_submit < 0.25:
+        if not self.hwnd or not self._visible or self._destroyed or self._menu_active:
             return
         # Defer until foreground activation has completed. Never re-enter
         # rendering from a WinEvent callback or while a native menu is open.
@@ -610,6 +640,7 @@ class CornerWidget:
 
     def _schedule_restore(self) -> None:
         """A bounded recovery burst after activation/menu dismissal, not polling."""
+        self._sync_fullscreen()
         if not self._can_present():
             return
         if self._restore_remaining:
@@ -619,6 +650,7 @@ class CornerWidget:
             self._restore_remaining = 0
 
     def _restore_tick(self) -> None:
+        self._sync_fullscreen()
         if not self._can_present():
             if self.hwnd:
                 user32.KillTimer(self.hwnd, TIMER_RESTORE)
@@ -637,19 +669,22 @@ class CornerWidget:
             self._resubmit()
 
     def _keepalive_tick(self) -> None:
-        """Low-frequency fallback, completely suspended during native menus."""
+        """Cheap visibility probe, never upload while fullscreen/menu-hidden."""
+        if not self.hwnd or not self._visible or self._destroyed or self._menu_active:
+            return
+        changed = self._sync_fullscreen()
         if not self._can_present():
             return
-        if self._is_covered_by_taskbar():
+        if changed or self._is_covered_by_taskbar():
             self._schedule_restore()
 
     def _start_keepalive(self) -> None:
-        """前台事件钩子 + 低频兜底定时器。"""
-        if not self._can_present():
+        """前台事件 + 500ms 几何兜底；临时隐藏期间不停止检测。"""
+        if not self.hwnd or not self._visible or self._destroyed or self._menu_active:
             return
         self._start_foreground_hook()
-        # No uploads on an idle timer. Activation/menu events do bounded work.
-        user32.SetTimer(self.hwnd, TIMER_KEEPALIVE, 1500, None)
+        # The timer only checks geometry/Z order: no idle bitmap resubmission.
+        user32.SetTimer(self.hwnd, TIMER_KEEPALIVE, 500, None)
 
     def _stop_keepalive(self) -> None:
         self._stop_foreground_hook()
@@ -663,6 +698,7 @@ class CornerWidget:
 
     # ---- 菜单 ----
     def _show_menu(self) -> None:
+        self._sync_fullscreen()
         if not self._can_present():
             return
         menu = user32.CreatePopupMenu()
@@ -691,7 +727,6 @@ class CornerWidget:
                 flags = MF_STRING | (MF_CHECKED if current == intervals[cmd_id] else 0)
                 user32.AppendMenuW(menu, flags, cmd_id, "刷新间隔：" + label)
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            user32.AppendMenuW(menu, MF_STRING, 2, "托盘图标开关")
             user32.AppendMenuW(menu, MF_STRING, 3, "隐藏此浮窗")
             user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(menu, MF_STRING, 90, "退出电量托盘")
@@ -725,7 +760,8 @@ class CornerWidget:
                 if self.hwnd and not self._destroyed:
                     # Required for reliable subsequent notification-area menus.
                     user32.PostMessageW(self.hwnd, 0, 0, 0)  # WM_NULL
-                if self._can_present():
+                if self.hwnd and self._visible and not self._destroyed:
+                    self._sync_fullscreen()
                     self._start_keepalive()
                     self._schedule_restore()
 

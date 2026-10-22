@@ -27,7 +27,7 @@ class LifecycleTests(unittest.TestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.callbacks = [MagicMock() for _ in range(6)]
-        self.widget = cw.CornerWidget(*self.callbacks, lambda: 60, MagicMock())
+        self.widget = cw.CornerWidget(*self.callbacks, lambda: 60, MagicMock(), fullscreen_probe=lambda hwnd: False)
         self.widget.hwnd = 456
         self.widget._shown = True
         self.widget._surface = (b"", 1, 1, 1)
