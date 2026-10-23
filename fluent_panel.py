@@ -324,7 +324,7 @@ class FluentPanel:
             fill=hex_color(mix("#213044", tone, .16)), outline="")
         device_icon(c, reading.key, x+s(33), y+s(31), s(23), tone if reading.ok else P["muted"])
         self.text(x+s(78), y+s(23), reading.title, 16, bold=True)
-        subtitle = reading.subtitle if self.preview else {"mouse": "星闪无线接收器", "keyboard": "无线键盘接收器", "gamepad": "XInput 系统电池状态"}[reading.key]
+        subtitle = reading.subtitle if self.preview else {"mouse": "星闪无线接收器", "keyboard": "Lofree Flow Lite · 无线接收器", "gamepad": "XInput 系统电池状态"}[reading.key]
         self.text(x+s(78), y+s(49), subtitle, 11, P["secondary"])
         color = state_color(reading)
         value = str(reading.level) if reading.ok and reading.level is not None else reading.coarse if reading.ok else "—"

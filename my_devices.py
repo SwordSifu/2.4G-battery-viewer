@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""我的三设备电量 —— VXE R1 NK / 洛斐键盘 / 八位堂手柄
+"""我的三设备电量 —— VXE R1 NK / 洛斐小顺 Lite / 猎户座 X Pro
 
 用法：
     python my_devices.py            打开 Fluent 面板（默认 60 秒自动刷新）

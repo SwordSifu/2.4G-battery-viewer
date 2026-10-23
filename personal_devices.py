@@ -21,7 +21,8 @@ from typing import Optional
 
 from personal_hid import HidChannel, ProtocolError, matches_interface
 
-DEVICE_TITLES = {"mouse": "VXE R1 NK 鼠标", "keyboard": "洛斐键盘", "gamepad": "八位堂手柄"}
+DEVICE_TITLES = {"mouse": "VXE R1 NK 鼠标", "keyboard": "洛斐小顺 Lite",
+                 "gamepad": "猎户座 X Pro"}
 DEVICE_KEYS = tuple(DEVICE_TITLES)
 
 
@@ -138,7 +139,7 @@ def _load_xinput():
 
 def read_gamepad(stop_event=None) -> Reading:
     """XInput only reports 4 levels; never convert that into a percentage."""
-    reading = Reading(DEVICE_TITLES["gamepad"], "2DC8:2030 · Ultimate 3mode Xbox",
+    reading = Reading(DEVICE_TITLES["gamepad"], "2DC8:2030 · 猎户座 X Pro",
                       key="gamepad", detail="XInput 电池档位（非百分比）",
                       extra="手柄不提供精确百分比；Windows 合成的 700/1000 不是 70%")
     try:

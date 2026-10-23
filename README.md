@@ -6,8 +6,8 @@
 | 设备 | 身份 | 读数方式 | 精度 |
 |---|---|---|---|
 | VXE R1 NK 鼠标（星闪） | `373B:10C9`，FF02:2，17/17 字节 | COMpx 接收器查询 03/04 | **真实百分比** |
-| 洛斐键盘 | `05AC:024F`，FF02:2，17/17 字节 | COMpx 接收器查询 03/04（byte5=0x80） | **真实百分比** |
-| 八位堂 Ultimate 3mode Xbox | `2DC8:2030` | XInput 电池档位 API | **仅四档，无百分比** |
+| 洛斐小顺 Lite（Lofree Flow Lite） | `05AC:024F`，FF02:2，17/17 字节 | COMpx 接收器查询 03/04（byte5=0x80） | **真实百分比** |
+| 猎户座 X Pro | `2DC8:2030` | XInput 电池档位 API | **仅四档，无百分比** |
 
 > 手柄这块必须说清楚：XInput 只给 EMPTY/LOW/MEDIUM/FULL 四档。
 > Windows 的 `BatteryReport` 还会把档位映射成 700/1000 这类合成容量，

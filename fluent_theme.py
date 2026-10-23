@@ -43,19 +43,19 @@ def demo_readings(scene="normal"):
     rows = [
         PreviewReading("mouse", "VXE R1 NK", "星闪无线接收器", 80, status="放电中",
                        detail="来自已验证的接收器协议；此处数值为演示。"),
-        PreviewReading("keyboard", "洛斐键盘", "2.4 GHz 无线接收器", 100, status="电量充足",
+        PreviewReading("keyboard", "洛斐小顺 Lite", "Lofree Flow Lite · 2.4 GHz", 100, status="电量充足",
                        detail="真实应用读取接收器百分比，不使用蓝牙缓存。"),
-        PreviewReading("gamepad", "八位堂手柄", "XInput 电池状态", coarse="中档", status="无线连接",
+        PreviewReading("gamepad", "猎户座 X Pro", "XInput 电池状态", coarse="中档", status="无线连接",
                        detail="系统仅报告四档电量；不换算为百分比。"),
     ]
     if scene == "low":
         rows[0] = PreviewReading("mouse", "VXE R1 NK", "星闪无线接收器", 21, status="建议充电")
-        rows[1] = PreviewReading("keyboard", "洛斐键盘", "2.4 GHz 无线接收器", 7, status="电量偏低")
-        rows[2] = PreviewReading("gamepad", "八位堂手柄", "XInput 电池状态", coarse="低档", status="电量偏低")
+        rows[1] = PreviewReading("keyboard", "洛斐小顺 Lite", "Lofree Flow Lite · 2.4 GHz", 7, status="电量偏低")
+        rows[2] = PreviewReading("gamepad", "猎户座 X Pro", "XInput 电池状态", coarse="低档", status="电量偏低")
     elif scene == "charging":
         rows[0] = PreviewReading("mouse", "VXE R1 NK", "星闪无线接收器", 80, status="充电中")
-        rows[1] = PreviewReading("keyboard", "洛斐键盘", "2.4 GHz 无线接收器", 62, status="充电指示开启")
-        rows[2] = PreviewReading("gamepad", "八位堂手柄", "XInput 电池状态", coarse="有线", status="有线连接")
+        rows[1] = PreviewReading("keyboard", "洛斐小顺 Lite", "Lofree Flow Lite · 2.4 GHz", 62, status="充电指示开启")
+        rows[2] = PreviewReading("gamepad", "猎户座 X Pro", "XInput 电池状态", coarse="有线", status="有线连接")
     elif scene == "offline":
         rows = [PreviewReading(r.key, r.title, r.subtitle, error="设备未连接或已休眠") for r in rows]
     return tuple(rows)
