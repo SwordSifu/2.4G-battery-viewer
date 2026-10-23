@@ -198,7 +198,7 @@ class LiveController:
             ok = sum(bool(row.ok) for row in rows)
             self._reading_status = (f"更新于 {time.strftime('%H:%M:%S')} · 成功读取 {ok}/{len(rows)} 个设备"
                                     " · 手柄仅显示系统电池档位，非百分比")
-            self._reading_error = ok < len(rows)
+            self._reading_error = ok == 0  # A sleeping pad is not a read failure.
         elif kind == "interval":
             self.interval_busy = False
             if success and value[0]:
@@ -367,15 +367,16 @@ class SettingsDialog:
         win.title("设置 · " + c.tc.UI_TITLE)
         win.configure(bg=P["bg"])
         win.transient(c.root)
-        win.geometry(f"{s(590)}x{s(550)}")
-        win.minsize(s(560), s(530))
+        win.geometry(f"{s(590)}x{s(478)}")
+        win.minsize(s(560), s(452))
         st = ttk.Style(win)
         st.configure("Live.TFrame", background=P["bg"])
         st.configure("Live.TLabel", background=P["bg"], foreground=P["text"], font=p.font(13))
         st.configure("Live.Muted.TLabel", background=P["bg"], foreground=P["secondary"], font=p.font(11))
-        st.configure("Live.TCheckbutton", background=P["bg"], foreground=P["text"], font=p.font(13),
-                     indicatorbackground=P["surface"], indicatorforeground=P["mint"])
-        st.map("Live.TCheckbutton", background=[("active", P["bg"])],
+        st.configure("Live.Toolbutton", background="#253346", foreground=P["text"], font=p.font(12),
+                     borderwidth=0, padding=(s(14), s(8)), focuscolor=P["bg"])
+        st.map("Live.Toolbutton",
+               background=[("active", "#35465d")],
                foreground=[("disabled", P["muted"])])
         st.configure("Live.TButton", background="#253346", foreground=P["text"],
                      borderwidth=0, padding=(s(12), s(8)), font=p.font(12))
@@ -384,12 +385,17 @@ class SettingsDialog:
                      foreground=P["text"], arrowcolor=P["secondary"], padding=s(7), font=p.font(12))
         st.map("Live.TCombobox", fieldbackground=[("readonly", "#223045")],
                foreground=[("readonly", P["text"]), ("disabled", P["muted"])])
+        footer = ttk.Frame(win, padding=(s(24), 0, s(24), s(18)), style="Live.TFrame")
+        footer.pack(fill="x", side="bottom")
+        ttk.Button(footer, text="完成", command=self.close, style="Live.TButton").pack(side="right")
         body = ttk.Frame(win, padding=s(24), style="Live.TFrame")
         body.pack(fill="both", expand=True)
         ttk.Label(body, text="刷新与后台", style="Live.TLabel", font=p.font(21, True)).pack(anchor="w")
         self.auto_var = tk.BooleanVar(win, value=c.auto)
-        ttk.Checkbutton(body, text="自动刷新面板", variable=self.auto_var, style="Live.TCheckbutton",
-                        command=lambda: c.set_auto(self.auto_var.get())).pack(anchor="w", pady=(s(20), s(12)))
+        self.auto_chip = ttk.Checkbutton(body, text="自动刷新面板", variable=self.auto_var,
+                                         style="Live.Toolbutton",
+                                         command=lambda: c.set_auto(self.auto_var.get()))
+        self.auto_chip.pack(anchor="w", pady=(s(20), s(12)))
         row = ttk.Frame(body, style="Live.TFrame")
         row.pack(fill="x")
         ttk.Label(row, text="刷新间隔", style="Live.TLabel").pack(side="left", padx=(0, s(18)))
@@ -401,7 +407,7 @@ class SettingsDialog:
         self.combo.bind("<<ComboboxSelected>>", lambda event: c.set_interval(self.lookup[self.interval_var.get()]))
         self.boot_var = tk.BooleanVar(win, value=False)
         self.boot = ttk.Checkbutton(body, text="开机启动电量环（任务管理器可见）", variable=self.boot_var,
-                                   style="Live.TCheckbutton", command=lambda: c.set_autostart(self.boot_var.get()))
+                                   style="Live.Toolbutton", command=lambda: c.set_autostart(self.boot_var.get()))
         self.boot.pack(anchor="w", pady=(s(23), s(10)))
         ttk.Label(body, text="仅操作本项目拥有的启动快捷方式；不会自动修复自启。",
                   style="Live.Muted.TLabel").pack(anchor="w")
@@ -419,7 +425,6 @@ class SettingsDialog:
                   style="Live.Muted.TLabel").pack(anchor="w")
         self.notice = ttk.Label(body, text="", style="Live.Muted.TLabel", wraplength=s(525), justify="left")
         self.notice.pack(fill="x", pady=(s(18), s(8)))
-        ttk.Button(body, text="完成", command=self.close, style="Live.TButton").pack(side="bottom", anchor="e")
         win.protocol("WM_DELETE_WINDOW", self.close)
         win.bind("<Escape>", lambda event: self.close())
         win.bind("<Destroy>", self._destroyed, add=True)
@@ -429,6 +434,9 @@ class SettingsDialog:
     def sync(self):
         c = self.controller
         self.auto_var.set(c.auto)
+        self.auto_chip.configure(text="自动刷新面板：开" if c.auto else "自动刷新面板：关")
+        self.boot.configure(text=("开机启动电量环：开（任务管理器可见）" if c.autostart
+                                  else "开机启动电量环：关（任务管理器可见）"))
         self.interval_var.set(dict(c.tc.INTERVAL_CHOICES).get(c.interval, f"{c.interval} 秒"))
         self.combo.configure(state="disabled" if c.interval_busy else "readonly")
         self.boot_var.set(bool(c.autostart))
