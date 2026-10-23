@@ -261,7 +261,7 @@ class CornerWidget:
     def __init__(self, on_refresh, on_open_panel, on_toggle_tray,
                  on_hide, on_quit, on_toggle_lock, interval_getter,
                  on_interval_change, locked: bool = True, position=None,
-                 fullscreen_probe=None):
+                 fullscreen_probe=None, renderer=None):
         self.on_refresh = on_refresh
         self.on_open_panel = on_open_panel
         self.on_toggle_tray = on_toggle_tray
@@ -295,6 +295,7 @@ class CornerWidget:
         # User intent and temporary fullscreen suppression are independent.
         self._fullscreen_suppressed = False
         self._fullscreen_probe = fullscreen_probe or foreground_fullscreen
+        self.renderer = renderer or rr  # Preview injection; stable renderer stays default.
 
     def _can_present(self) -> bool:
         return bool(self.hwnd and self._visible and not self._destroyed
@@ -438,7 +439,7 @@ class CornerWidget:
         if base is not None:
             luminance = 0.299 * base[0] + 0.587 * base[1] + 0.114 * base[2]
             text_color = (26, 28, 32) if luminance > 140 else None
-        data, w, h = rr.render_panel(self.readings, scale=scale, height_px=band_h,
+        data, w, h = self.renderer.render_panel(self.readings, scale=scale, height_px=band_h,
                                      plate_color=plate_color, plate_alpha=plate_alpha,
                                      text_color=text_color)
         if w <= 0 or h <= 0:
@@ -785,7 +786,7 @@ class CornerWidget:
             user32.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
                                             wintypes.BOOL]
             gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
-            geo = rr.panel_geometry(_dpi_scale(None), h)
+            geo = self.renderer.panel_geometry(_dpi_scale(None), h)
             pad = max(2, int(round(geo["thickness"] * 0.55)))
             total = None
             for cx in geo["centers"]:

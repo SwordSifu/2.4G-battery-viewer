@@ -252,6 +252,7 @@ class TrayApp:
         corner = None
         try:
             import corner_widget
+            import fluent_ring_render
             corner = corner_widget.CornerWidget(
                 on_refresh=self.refresh_now,
                 on_open_panel=self.open_ui,
@@ -263,6 +264,7 @@ class TrayApp:
                 on_interval_change=self.set_interval_from_menu,
                 locked=self.corner_locked,
                 position=self.cfg.get("corner_pos"),
+                renderer=fluent_ring_render,
             )
             if not corner.create():
                 raise RuntimeError("无法创建左下角电量环")
